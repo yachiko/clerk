@@ -37,6 +37,7 @@ func NewModel(client *aws.Client, cacheMgr *cache.Manager, cfg *config.Config) M
 	return Model{
 		state: State{
 			Mode:          ViewModeList,
+			PreviousMode:  ViewModeList,
 			ExpandedPaths: make(map[string]bool),
 		},
 		client:      client,
@@ -295,7 +296,7 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if m.state.Mode == ViewModeDescribe {
-			m.state.Mode = ViewModeList
+			m.state.Mode = m.state.PreviousMode
 			return m, nil
 		}
 		m.quitting = true
@@ -375,9 +376,11 @@ func (m Model) handleBrowseKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.state.Mode == ViewModeList {
 			m.state.Mode = ViewModeTree
 			m.buildTree()
-		} else {
+		} else if m.state.Mode == ViewModeTree {
 			m.state.Mode = ViewModeList
 		}
+		// Update PreviousMode when in browse mode (not describe)
+		m.state.PreviousMode = m.state.Mode
 		return m, nil
 
 	case " ":
@@ -395,8 +398,8 @@ func (m Model) handleBrowseKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case "d", "enter":
 		// Describe selected item
-		if len(m.state.FilteredItems) > 0 && m.state.SelectedIndex < len(m.state.FilteredItems) {
-			entry := m.state.FilteredItems[m.state.SelectedIndex]
+		entry := m.getSelectedEntry()
+		if entry != nil {
 			// Trim whitespace from parameter name in case of encoding issues
 			paramName := strings.TrimSpace(entry.Name)
 			if paramName == "" {
@@ -404,7 +407,8 @@ func (m Model) handleBrowseKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 					return errorMsg("Invalid parameter name")
 				}
 			}
-			m.state.DescribeEntry = &entry
+			m.state.DescribeEntry = entry
+			m.state.PreviousMode = m.state.Mode // Store current mode to restore later
 			m.state.Mode = ViewModeDescribe
 			// Use config to determine if value should be masked by default
 			m.state.DescribeMasked = !m.config.DecryptByDefault
@@ -414,24 +418,24 @@ func (m Model) handleBrowseKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case "c":
 		// Copy secret value
-		if len(m.state.FilteredItems) > 0 && m.state.SelectedIndex < len(m.state.FilteredItems) {
-			entry := m.state.FilteredItems[m.state.SelectedIndex]
+		entry := m.getSelectedEntry()
+		if entry != nil {
 			return m, m.copySecret(entry.Name)
 		}
 		return m, nil
 
 	case "e":
 		// Edit
-		if len(m.state.FilteredItems) > 0 && m.state.SelectedIndex < len(m.state.FilteredItems) {
-			entry := m.state.FilteredItems[m.state.SelectedIndex]
+		entry := m.getSelectedEntry()
+		if entry != nil {
 			return m, m.editSecret(entry.Name)
 		}
 		return m, nil
 
 	case "delete":
 		// Delete (requires confirmation)
-		if len(m.state.FilteredItems) > 0 && m.state.SelectedIndex < len(m.state.FilteredItems) {
-			entry := m.state.FilteredItems[m.state.SelectedIndex]
+		entry := m.getSelectedEntry()
+		if entry != nil {
 			return m, m.initiateDelete(entry.Name)
 		}
 		return m, nil
@@ -440,11 +444,33 @@ func (m Model) handleBrowseKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// getSelectedEntry returns the selected entry based on current view mode
+func (m *Model) getSelectedEntry() *cache.CacheEntry {
+	if m.state.Mode == ViewModeTree {
+		// In tree view, get from TreeNodes
+		if m.state.SelectedIndex >= 0 && m.state.SelectedIndex < len(m.state.TreeNodes) {
+			node := m.state.TreeNodes[m.state.SelectedIndex]
+			// Only return entry if it's not a directory
+			if !node.IsDir && node.Entry != nil {
+				return node.Entry
+			}
+		}
+		return nil
+	}
+
+	// In list view, get from FilteredItems
+	if m.state.SelectedIndex >= 0 && m.state.SelectedIndex < len(m.state.FilteredItems) {
+		entry := m.state.FilteredItems[m.state.SelectedIndex]
+		return &entry
+	}
+	return nil
+}
+
 // handleDescribeKeys handles keys in describe view
 func (m Model) handleDescribeKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "esc", "q":
-		m.state.Mode = ViewModeList
+		m.state.Mode = m.state.PreviousMode
 		// Reset scroll offsets
 		m.state.HistoryScrollOffset = 0
 		m.state.ValueScrollOffset = 0
@@ -466,6 +492,13 @@ func (m Model) handleDescribeKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// Copy value
 		if m.state.DescribeValue != "" {
 			return m, m.copyValue(m.state.DescribeValue)
+		}
+		return m, nil
+
+	case "e":
+		// Edit parameter
+		if m.state.DescribeParamName != "" {
+			return m, m.editSecret(m.state.DescribeParamName)
 		}
 		return m, nil
 
