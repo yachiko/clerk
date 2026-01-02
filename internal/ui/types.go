@@ -19,6 +19,7 @@ type State struct {
 
 	// View state
 	Mode          ViewMode
+	PreviousMode  ViewMode // Track previous mode to restore after describe view
 	SelectedIndex int
 	ScrollOffset  int
 

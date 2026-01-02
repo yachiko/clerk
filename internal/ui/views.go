@@ -164,7 +164,7 @@ func (m Model) renderBrowseView() string {
 	lines = append(lines, statusLine)
 
 	// Help line
-	help := "↑↓:navigate  d:describe  c:copy  t:tree  /:search  q:quit"
+	help := "↑↓:navigate  d:describe  e:edit  c:copy  t:tree  /:search  q:quit"
 	lines = append(lines, helpStyle.Render(help))
 
 	return strings.Join(lines, "\n")
@@ -291,7 +291,7 @@ func (m Model) renderDescribeView() string {
 	output = append(output, statusLine)
 
 	// Help
-	help := "x:mask  c:copy  tab/⇧tab:version  ↑↓:scroll  ←→:horiz  w:wrap  esc:back  q:quit"
+	help := "x:mask  c:copy  e:edit  tab/⇧tab:version  ↑↓:scroll  ←→:horiz  w:wrap  esc:back  q:quit"
 	output = append(output, helpStyle.Render(help))
 
 	return strings.Join(output, "\n")
