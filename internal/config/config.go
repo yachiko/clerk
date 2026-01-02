@@ -102,6 +102,10 @@ func (m *Manager) GetValue(key string) (string, error) {
 		return strconv.Itoa(m.config.ParallelFetches), nil
 	case "search_slash_prefix", "search.slash.prefix":
 		return strconv.FormatBool(m.config.SearchSlashPrefix), nil
+	case "describe_page_size", "describe.page.size":
+		return strconv.Itoa(int(m.config.DescribePageSize)), nil
+	case "describe_max_items", "describe.max.items":
+		return strconv.Itoa(int(m.config.DescribeMaxItems)), nil
 	default:
 		return "", fmt.Errorf("unknown configuration key: %s", key)
 	}
@@ -150,6 +154,18 @@ func (m *Manager) SetValue(key, value string) error {
 			return fmt.Errorf("invalid boolean value for search_slash_prefix: %w", err)
 		}
 		m.config.SearchSlashPrefix = b
+	case "describe_page_size", "describe.page.size":
+		n, err := strconv.Atoi(value)
+		if err != nil || n < 1 || n > 50 {
+			return fmt.Errorf("describe_page_size must be between 1 and 50")
+		}
+		m.config.DescribePageSize = int32(n)
+	case "describe_max_items", "describe.max.items":
+		n, err := strconv.Atoi(value)
+		if err != nil || n < 0 {
+			return fmt.Errorf("describe_max_items must be >= 0 (0 = unlimited)")
+		}
+		m.config.DescribeMaxItems = int32(n)
 	default:
 		return fmt.Errorf("unknown configuration key: %s", key)
 	}
@@ -168,6 +184,8 @@ func (m *Manager) ListKeys() []string {
 		"default_sort",
 		"parallel_fetches",
 		"search_slash_prefix",
+		"describe_page_size",
+		"describe_max_items",
 	}
 }
 

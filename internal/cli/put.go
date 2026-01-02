@@ -101,8 +101,10 @@ func runPut(cmd *cobra.Command, args []string) error {
 
 	// Create AWS client
 	awsOpts := aws.ClientOptions{
-		Region:  globalOpts.Region,
-		Profile: globalOpts.Profile,
+		Region:           globalOpts.Region,
+		Profile:          globalOpts.Profile,
+		DescribePageSize: cfg.DescribePageSize,
+		DescribeMaxItems: cfg.DescribeMaxItems,
 	}
 	if awsOpts.Region == "" {
 		awsOpts.Region = cfg.Region
