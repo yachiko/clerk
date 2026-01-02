@@ -28,7 +28,7 @@ It's the main feature of the tool, allowing users to interactively explore and m
 
 Browse view should just show secret names by default, with option to toggle tree view (by 't' key) to show secrets in hierarchical structure based on their paths. In tree view, user should be able to collapse/expand nodes using space key.
 
-In describe view we should show secret metadata like version history, created date, modified date, tags, user should be able to use up/down arrows to navigate through versions. Fetch 3 latest versions when user opens describe view, fetch more versions when user navigates to older versions.
+In describe view we should show secret metadata like version history, created date, modified date, tags. Users can navigate through versions using tab/shift+tab keys. The value panel supports vertical scrolling with arrow keys and page up/down. For long lines, users can either enable line wrapping with the 'w' key or scroll horizontally using left/right arrow keys or shift+scroll wheel. Fetch version history metadata when entering describe view.
 
 Editing and saving a secret should create a new version in AWS Parameter Store.
 
@@ -88,15 +88,30 @@ Generate comprehensive documentation for the CLI tool, including installation in
 
 # Keyboard Shortcuts
 
-'c' - copy secret value to clipboard (browse and describe view)
-'d' - describe secret (browse view)
-'e' - edit secret (browse view)
-'del' - delete secret (browse view)
-'q' - quit (browse and describe view)
-'/' - search (browse view)
-'t' - toggle tree/flat view (browse view)
-'x' - decrypt / encrypt secret value in describe view
-'space' - collapse/expand tree node (tree view in browse view)
+**Browse View:**
+- 'c' - copy secret value to clipboard
+- 'd' - describe secret
+- 'e' - edit secret
+- 'del' - delete secret
+- 'q' - quit
+- '/' - search
+- 't' - toggle tree/flat view
+- 'space' - collapse/expand tree node (tree view)
+
+**Describe View:**
+- 'tab' / 'shift+tab' - navigate to next/previous version
+- '↑' / '↓' - scroll value vertically
+- '←' / '→' - scroll value horizontally (when line wrap is off)
+- 'pgup' / 'pgdown' - page up/down in value
+- 'w' - toggle line wrapping
+- 'x' - toggle mask/unmask secret value
+- 'c' - copy secret value to clipboard
+- 'esc' - return to browse view
+- 'q' - quit
+
+**Mouse Support (Describe View):**
+- Scroll wheel - scroll value vertically
+- Shift + scroll wheel - scroll value horizontally (when line wrap is off)
 
 # Default Config Values
 

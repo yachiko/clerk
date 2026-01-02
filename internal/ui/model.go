@@ -149,12 +149,26 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.state.Mode == ViewModeDescribe {
 			switch msg.Type {
 			case tea.MouseWheelUp:
-				if m.state.ValueScrollOffset > 0 {
-					m.state.ValueScrollOffset--
+				// Shift + wheel: horizontal scroll
+				if msg.Shift && !m.state.ValueLineWrap {
+					if m.state.ValueHorizontalScroll > 0 {
+						m.state.ValueHorizontalScroll--
+					}
+				} else {
+					// Normal wheel: vertical scroll
+					if m.state.ValueScrollOffset > 0 {
+						m.state.ValueScrollOffset--
+					}
 				}
 				return m, nil
 			case tea.MouseWheelDown:
-				m.state.ValueScrollOffset++
+				// Shift + wheel: horizontal scroll
+				if msg.Shift && !m.state.ValueLineWrap {
+					m.state.ValueHorizontalScroll++
+				} else {
+					// Normal wheel: vertical scroll
+					m.state.ValueScrollOffset++
+				}
 				return m, nil
 			}
 		}
@@ -434,11 +448,18 @@ func (m Model) handleDescribeKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// Reset scroll offsets
 		m.state.HistoryScrollOffset = 0
 		m.state.ValueScrollOffset = 0
+		m.state.ValueHorizontalScroll = 0
 		return m, nil
 
 	case "x":
 		// Toggle masked/unmasked
 		m.state.DescribeMasked = !m.state.DescribeMasked
+		return m, nil
+
+	case "w":
+		// Toggle line wrapping
+		m.state.ValueLineWrap = !m.state.ValueLineWrap
+		m.state.ValueHorizontalScroll = 0 // Reset horizontal scroll when toggling wrap
 		return m, nil
 
 	case "c":
@@ -448,16 +469,7 @@ func (m Model) handleDescribeKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
-	case "up", "k":
-		// Navigate to newer version (decrease index)
-		if m.state.HistoryIndex > 0 {
-			m.state.HistoryIndex--
-			// Update value and trigger lazy load if needed
-			return m.updateSelectedVersion()
-		}
-		return m, nil
-
-	case "down", "j":
+	case "tab":
 		// Navigate to older version (increase index)
 		if m.state.HistoryIndex < len(m.state.DescribeHistory)-1 {
 			m.state.HistoryIndex++
@@ -466,16 +478,52 @@ func (m Model) handleDescribeKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
-	case "pgup":
+	case "shift+tab":
+		// Navigate to newer version (decrease index)
+		if m.state.HistoryIndex > 0 {
+			m.state.HistoryIndex--
+			// Update value and trigger lazy load if needed
+			return m.updateSelectedVersion()
+		}
+		return m, nil
+
+	case "up", "k":
 		// Scroll value up
 		if m.state.ValueScrollOffset > 0 {
 			m.state.ValueScrollOffset--
 		}
 		return m, nil
 
-	case "pgdown":
+	case "down", "j":
 		// Scroll value down
 		m.state.ValueScrollOffset++
+		return m, nil
+
+	case "left", "h":
+		// Scroll horizontally left
+		if !m.state.ValueLineWrap && m.state.ValueHorizontalScroll > 0 {
+			m.state.ValueHorizontalScroll--
+		}
+		return m, nil
+
+	case "right", "l":
+		// Scroll horizontally right
+		if !m.state.ValueLineWrap {
+			m.state.ValueHorizontalScroll++
+		}
+		return m, nil
+
+	case "pgup":
+		// Scroll value up by page
+		m.state.ValueScrollOffset -= 10
+		if m.state.ValueScrollOffset < 0 {
+			m.state.ValueScrollOffset = 0
+		}
+		return m, nil
+
+	case "pgdown":
+		// Scroll value down by page
+		m.state.ValueScrollOffset += 10
 		return m, nil
 	}
 
@@ -618,12 +666,7 @@ func (m Model) loadDescribe(name string) tea.Cmd {
 		// Get current value
 		param, err := m.client.GetParameter(ctx, name, true)
 		if err != nil {
-			// More informative error message
-			msg := "Failed to load parameter"
-			if err != nil {
-				msg += ": " + err.Error()
-			}
-			return errorMsg(msg)
+			return errorMsg("Failed to load parameter: " + err.Error())
 		}
 
 		var historyEntries []HistoryEntry
