@@ -26,7 +26,7 @@ Plan creation of simple Goland CLI tool that will help managing secrets in AWS P
 
 It's the main feature of the tool, allowing users to interactively explore and manage their secrets stored in AWS Parameter Store. The browse feature will provide a user-friendly terminal UI that enables users to navigate through their secrets, view details, and perform actions such as updating or deleting secrets. It should enable quick search and filtering based on name or tags. Caching will be needed to improve performance when dealing with a large number of secrets. (clerk refresh to update cache). Follow similar principle like k9s tool for kubernetes, when user can navigate using keyboard arrows, then click a key to perform an action (d for describe, e for edit, del for delete, q for quit, / for search). Edit should open the secret in vscode or default $EDITOR.
 
-Browse view should just show secret names by default, with option to toggle tree view (by 't' key) to show secrets in hierarchical structure based on their paths. In tree view, user should be able to collapse/expand nodes using space key.
+Browse view should just show secret names by default, with option to toggle tree view (by 't' key) to show secrets in hierarchical structure based on their paths. In tree view, user should be able to collapse/expand nodes using space key. The browse view displays the parameter name, type, version, and modified date (if terminal width >= 100 chars). The modified date column automatically hides on narrow terminals to ensure usability.
 
 In describe view we should show secret metadata like version history, created date, modified date, tags. Users can navigate through versions using tab/shift+tab keys. The value panel supports vertical scrolling with arrow keys and page up/down. For long lines, users can either enable line wrapping with the 'w' key or scroll horizontally using left/right arrow keys or shift+scroll wheel. Fetch version history metadata when entering describe view.
 
@@ -96,10 +96,12 @@ Generate comprehensive documentation for the CLI tool, including installation in
 - 'q' - quit
 - '/' - search
 - 't' - toggle tree/flat view
+- 's' - cycle through sort options (name → modified → version → name)
 - 'space' - collapse/expand tree node (tree view)
 
 **Describe View:**
 - 'tab' / 'shift+tab' - navigate to next/previous version
+- 'l' - jump to latest version
 - '↑' / '↓' - scroll value vertically
 - '←' / '→' - scroll value horizontally (when line wrap is off)
 - 'pgup' / 'pgdown' - page up/down in value
@@ -108,6 +110,9 @@ Generate comprehensive documentation for the CLI tool, including installation in
 - 'c' - copy secret value to clipboard
 - 'esc' - return to browse view
 - 'q' - quit
+
+**Mouse Support (Browse View):**
+- Scroll wheel - scroll list/tree vertically
 
 **Mouse Support (Describe View):**
 - Scroll wheel - scroll value vertically
