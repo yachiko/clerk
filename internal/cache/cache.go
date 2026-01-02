@@ -222,7 +222,16 @@ func (m *Manager) Delete(name string) error {
 type RefreshProgressCallback func(current, total int)
 
 // Refresh updates the entire cache from AWS
+// It optimizes by reusing cached tags for unchanged parameters (same version)
 func (m *Manager) Refresh(ctx context.Context, client *aws.Client, region string, parallel int, progressCb RefreshProgressCallback) error {
+	// Build a map of existing entries by name for quick lookup
+	m.mu.RLock()
+	existingByName := make(map[string]CacheEntry, len(m.data.Entries))
+	for _, e := range m.data.Entries {
+		existingByName[e.Name] = e
+	}
+	m.mu.RUnlock()
+
 	// Stream parameters as they're discovered
 	paramsCh := make(chan aws.ParameterMetadata, 100)
 	var streamErr error
@@ -240,12 +249,14 @@ func (m *Manager) Refresh(ctx context.Context, client *aws.Client, region string
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, parallel)
 	completed := 0
+	reused := 0
 
 	for param := range paramsCh {
 		wg.Add(1)
 		go func(p aws.ParameterMetadata) {
 			defer wg.Done()
 
+			// Acquire semaphore slot to limit concurrency
 			sem <- struct{}{}
 			defer func() { <-sem }()
 
@@ -253,6 +264,21 @@ func (m *Manager) Refresh(ctx context.Context, client *aws.Client, region string
 				return
 			}
 
+			// Check if we can reuse cached entry (same version = unchanged)
+			if existing, ok := existingByName[p.Name]; ok && existing.Version == p.Version {
+				// Reuse cached entry - no need to fetch tags
+				mu.Lock()
+				entries = append(entries, existing)
+				completed++
+				reused++
+				if progressCb != nil {
+					progressCb(completed, 0)
+				}
+				mu.Unlock()
+				return
+			}
+
+			// New or changed parameter - fetch tags
 			entry := CacheEntry{
 				Name:             p.Name,
 				Type:             p.Type,
@@ -269,7 +295,7 @@ func (m *Manager) Refresh(ctx context.Context, client *aws.Client, region string
 			entries = append(entries, entry)
 			completed++
 			if progressCb != nil {
-				progressCb(completed, 0) // total unknown during streaming
+				progressCb(completed, 0)
 			}
 			mu.Unlock()
 		}(param)

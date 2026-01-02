@@ -13,14 +13,18 @@ import (
 
 // Client wraps the AWS SSM client
 type Client struct {
-	ssm    *ssm.Client
-	region string
+	ssm              *ssm.Client
+	region           string
+	describePageSize int32
+	describeMaxItems int32
 }
 
 // ClientOptions contains options for creating a new client
 type ClientOptions struct {
-	Region  string
-	Profile string
+	Region           string
+	Profile          string
+	DescribePageSize int32
+	DescribeMaxItems int32
 }
 
 // NewClient creates a new AWS SSM client
@@ -39,9 +43,16 @@ func NewClient(ctx context.Context, opts ClientOptions) (*Client, error) {
 		return nil, fmt.Errorf("failed to load AWS config: %w", err)
 	}
 
+	pageSize := opts.DescribePageSize
+	if pageSize == 0 {
+		pageSize = 50 // Default to maximum
+	}
+
 	return &Client{
-		ssm:    ssm.NewFromConfig(cfg),
-		region: cfg.Region,
+		ssm:              ssm.NewFromConfig(cfg),
+		region:           cfg.Region,
+		describePageSize: pageSize,
+		describeMaxItems: opts.DescribeMaxItems,
 	}, nil
 }
 
@@ -273,7 +284,9 @@ func (c *Client) listParametersWithFilter(ctx context.Context, pattern string) (
 func (c *Client) DescribeAllParameters(ctx context.Context) ([]ParameterMetadata, error) {
 	var params []ParameterMetadata
 
-	input := &ssm.DescribeParametersInput{}
+	input := &ssm.DescribeParametersInput{
+		MaxResults: aws.Int32(c.describePageSize),
+	}
 	paginator := ssm.NewDescribeParametersPaginator(c.ssm, input)
 
 	for paginator.HasMorePages() {
@@ -289,6 +302,11 @@ func (c *Client) DescribeAllParameters(ctx context.Context) ([]ParameterMetadata
 				Version:          p.Version,
 				LastModifiedDate: aws.ToTime(p.LastModifiedDate),
 			})
+
+			// Check max-items limit
+			if c.describeMaxItems > 0 && int32(len(params)) >= c.describeMaxItems {
+				return params[:c.describeMaxItems], nil
+			}
 		}
 	}
 
@@ -299,9 +317,12 @@ func (c *Client) DescribeAllParameters(ctx context.Context) ([]ParameterMetadata
 func (c *Client) DescribeParametersStream(ctx context.Context, ch chan<- ParameterMetadata) error {
 	defer close(ch)
 
-	input := &ssm.DescribeParametersInput{}
+	input := &ssm.DescribeParametersInput{
+		MaxResults: aws.Int32(c.describePageSize),
+	}
 	paginator := ssm.NewDescribeParametersPaginator(c.ssm, input)
 
+	var count int32
 	for paginator.HasMorePages() {
 		if ctx.Err() != nil {
 			return ctx.Err()
@@ -313,6 +334,11 @@ func (c *Client) DescribeParametersStream(ctx context.Context, ch chan<- Paramet
 		}
 
 		for _, p := range output.Parameters {
+			// Check max-items limit before sending
+			if c.describeMaxItems > 0 && count >= c.describeMaxItems {
+				return nil
+			}
+
 			select {
 			case <-ctx.Done():
 				return ctx.Err()
@@ -322,6 +348,7 @@ func (c *Client) DescribeParametersStream(ctx context.Context, ch chan<- Paramet
 				Version:          p.Version,
 				LastModifiedDate: aws.ToTime(p.LastModifiedDate),
 			}:
+				count++
 			}
 		}
 	}

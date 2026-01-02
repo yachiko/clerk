@@ -78,8 +78,10 @@ func runBrowse(cmd *cobra.Command, args []string) error {
 	}
 
 	awsOpts := aws.ClientOptions{
-		Region:  region,
-		Profile: profile,
+		Region:           region,
+		Profile:          profile,
+		DescribePageSize: cfg.DescribePageSize,
+		DescribeMaxItems: cfg.DescribeMaxItems,
 	}
 
 	client, err := aws.NewClient(ctx, awsOpts)
