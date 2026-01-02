@@ -236,7 +236,7 @@ func (m Model) renderTreeItems(b *strings.Builder, start, end int) {
 
 // renderDescribeView renders the describe view
 func (m Model) renderDescribeView() string {
-	var lines []string
+	var output []string
 
 	if m.state.DescribeEntry == nil {
 		return "No entry selected"
@@ -244,54 +244,40 @@ func (m Model) renderDescribeView() string {
 
 	entry := m.state.DescribeEntry
 
-	// Title
+	// Title (fixed at top)
 	title := titleStyle.Render(" DESCRIBE ")
-	lines = append(lines, title)
+	output = append(output, title)
+	output = append(output, "")
 
-	// Parameter info box
+	// Parameter info box (fixed at top, full width)
 	box := m.renderDescribeBox(entry)
-	boxLines := strings.Split(box, "\n")
-	lines = append(lines, boxLines...)
+	output = append(output, box)
+	output = append(output, "")
 
-	// Value section
-	lines = append(lines, "")
-	lines = append(lines, labelStyle.Render("VALUE"))
-	lines = append(lines, strings.Repeat("─", 40))
-
-	if m.state.DescribeValue == "" {
-		lines = append(lines, dimStyle.Render("Loading..."))
-	} else {
-		value := m.state.DescribeValue
-		if m.state.DescribeMasked {
-			value = util.MaskValue(value)
-			lines = append(lines, maskedStyle.Render(value))
-		} else {
-			lines = append(lines, valueStyle.Render(value))
-		}
+	// Calculate panel dimensions
+	leftWidth := 35                             // Version history panel width
+	rightWidth := m.state.Width - leftWidth - 4 // Value panel width (minus spacing)
+	if rightWidth < 40 {
+		rightWidth = 40
 	}
 
-	// Version history
-	lines = append(lines, "")
-	lines = append(lines, labelStyle.Render("VERSION HISTORY"))
-	lines = append(lines, strings.Repeat("─", 40))
-
-	if len(m.state.DescribeHistory) == 0 {
-		lines = append(lines, dimStyle.Render("Loading..."))
-	} else {
-		for i, h := range m.state.DescribeHistory {
-			versionStr := fmt.Sprintf("v%d - %s", h.Version, h.Modified)
-			if i == m.state.HistoryIndex {
-				lines = append(lines, versionSelectedStyle.Render("▸ "+versionStr))
-			} else {
-				lines = append(lines, versionNormalStyle.Render("  "+versionStr))
-			}
-		}
+	// Calculate available height for panels
+	// Title(1) + empty(1) + box(~7) + empty(1) + panels + empty(1) + status(1) + help(1) = Height
+	panelHeight := m.state.Height - 13
+	if panelHeight < 10 {
+		panelHeight = 10
 	}
 
-	// Pad with empty lines to fill space
-	for len(lines) < m.state.Height-2 {
-		lines = append(lines, "")
-	}
+	// Render left panel (version history)
+	leftPanel := m.renderVersionHistoryPanel(leftWidth, panelHeight)
+
+	// Render right panel (value)
+	rightPanel := m.renderValuePanel(rightWidth, panelHeight)
+
+	// Join panels horizontally
+	panels := lipgloss.JoinHorizontal(lipgloss.Top, leftPanel, rightPanel)
+	output = append(output, panels)
+	output = append(output, "")
 
 	// Status/Error message
 	var statusLine string
@@ -302,13 +288,172 @@ func (m Model) renderDescribeView() string {
 	} else {
 		statusLine = ""
 	}
-	lines = append(lines, statusLine)
+	output = append(output, statusLine)
 
 	// Help
-	help := "x:toggle-mask  c:copy  ↑↓:version  esc:back  q:quit"
-	lines = append(lines, helpStyle.Render(help))
+	help := "x:toggle-mask  c:copy  ↑↓:version  PgUp/PgDn:scroll-value  esc:back  q:quit"
+	output = append(output, helpStyle.Render(help))
 
-	return strings.Join(lines, "\n")
+	return strings.Join(output, "\n")
+}
+
+// renderVersionHistoryPanel renders the version history panel
+func (m Model) renderVersionHistoryPanel(width, height int) string {
+	var lines []string
+
+	// Header
+	header := labelStyle.Render("VERSION HISTORY")
+	lines = append(lines, header)
+	lines = append(lines, "")
+
+	if len(m.state.DescribeHistory) == 0 {
+		lines = append(lines, dimStyle.Render("Loading..."))
+	} else {
+		// Calculate how many items fit in the panel
+		maxVisible := height - 4 // Subtract header and padding
+		if maxVisible < 1 {
+			maxVisible = 1
+		}
+
+		start := m.state.HistoryScrollOffset
+		end := start + maxVisible
+		if end > len(m.state.DescribeHistory) {
+			end = len(m.state.DescribeHistory)
+		}
+
+		for i := start; i < end; i++ {
+			h := m.state.DescribeHistory[i]
+			versionStr := fmt.Sprintf("v%d - %s", h.Version, h.Modified)
+			if i == m.state.HistoryIndex {
+				lines = append(lines, selectedStyle.Render("▸ "+versionStr))
+			} else {
+				lines = append(lines, normalStyle.Render("  "+versionStr))
+			}
+		}
+	}
+
+	// Pad to fill panel height
+	for len(lines) < height-2 {
+		lines = append(lines, "")
+	}
+
+	// Add scroll indicator at bottom if needed
+	if len(m.state.DescribeHistory) > 0 {
+		scrollInfo := fmt.Sprintf("%d/%d", m.state.HistoryIndex+1, len(m.state.DescribeHistory))
+		lines = append(lines, dimStyle.Render(scrollInfo))
+	} else {
+		lines = append(lines, "")
+	}
+
+	content := strings.Join(lines, "\n")
+
+	panelStyle := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(lipgloss.Color("62")).
+		Padding(0, 1).
+		Width(width).
+		Height(height)
+
+	return panelStyle.Render(content)
+}
+
+// renderValuePanel renders the value panel
+func (m Model) renderValuePanel(width, height int) string {
+	var lines []string
+
+	// Header
+	header := labelStyle.Render("VALUE")
+	if m.state.DescribeMasked {
+		header += " " + dimStyle.Render("(masked)")
+	}
+	lines = append(lines, header)
+	lines = append(lines, "")
+
+	if m.state.DescribeValue == "" {
+		lines = append(lines, dimStyle.Render("Loading..."))
+	} else {
+		value := m.state.DescribeValue
+		if m.state.DescribeMasked {
+			value = util.MaskValue(value)
+		}
+
+		// Split value into lines
+		valueLines := strings.Split(value, "\n")
+
+		// Calculate available lines for content
+		availableLines := height - 5 // Subtract header, padding, scroll indicator
+		if availableLines < 1 {
+			availableLines = 1
+		}
+
+		start := m.state.ValueScrollOffset
+		end := start + availableLines
+		if start >= len(valueLines) {
+			start = len(valueLines) - 1
+			if start < 0 {
+				start = 0
+			}
+			m.state.ValueScrollOffset = start
+		}
+		if end > len(valueLines) {
+			end = len(valueLines)
+		}
+
+		// Render visible lines with proper wrapping for width
+		contentWidth := width - 4 // Account for border and padding
+		for i := start; i < end; i++ {
+			line := valueLines[i]
+			// Wrap long lines
+			if len(line) > contentWidth {
+				line = line[:contentWidth-3] + "..."
+			}
+			if m.state.DescribeMasked {
+				lines = append(lines, maskedStyle.Render(line))
+			} else {
+				lines = append(lines, valueStyle.Render(line))
+			}
+		}
+	}
+
+	// Pad to fill panel height
+	for len(lines) < height-2 {
+		lines = append(lines, "")
+	}
+
+	// Add scroll indicator at bottom if needed
+	if m.state.DescribeValue != "" {
+		valueLines := strings.Split(m.state.DescribeValue, "\n")
+		if len(valueLines) > 1 {
+			scrollInfo := fmt.Sprintf("lines %d-%d/%d",
+				m.state.ValueScrollOffset+1,
+				min(m.state.ValueScrollOffset+height-5, len(valueLines)),
+				len(valueLines))
+			lines = append(lines, dimStyle.Render(scrollInfo))
+		} else {
+			lines = append(lines, "")
+		}
+	} else {
+		lines = append(lines, "")
+	}
+
+	content := strings.Join(lines, "\n")
+
+	panelStyle := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(lipgloss.Color("62")).
+		Padding(0, 1).
+		Width(width).
+		Height(height)
+
+	return panelStyle.Render(content)
+}
+
+// min returns the minimum of two integers
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 // renderDescribeBox renders the parameter info box
@@ -329,7 +474,12 @@ func (m Model) renderDescribeBox(entry *cache.CacheEntry) string {
 	}
 
 	content := strings.Join(lines, "\n")
-	return borderStyle.Width(60).Render(content)
+	// Use full width minus a small margin
+	boxWidth := m.state.Width - 4
+	if boxWidth < 60 {
+		boxWidth = 60
+	}
+	return borderStyle.Width(boxWidth).Render(content)
 }
 
 // renderConfirmDialog renders the confirmation dialog overlay

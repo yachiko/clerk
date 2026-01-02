@@ -51,6 +51,7 @@ func NewModel(client *aws.Client, cacheMgr *cache.Manager, cfg *config.Config) M
 func (m Model) Init() tea.Cmd {
 	return tea.Batch(
 		tea.EnterAltScreen,
+		tea.EnableMouseAllMotion,
 		m.loadEntries,
 	)
 }
@@ -71,6 +72,10 @@ type clearStatusMsg struct{}
 type describeLoadedMsg struct {
 	value   string
 	history []HistoryEntry
+}
+
+type versionValuesLoadedMsg struct {
+	versions map[int64]string // version -> value mapping
 }
 
 type editCompleteMsg struct {
@@ -139,6 +144,22 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyMsg:
 		return m.handleKeyPress(msg)
 
+	case tea.MouseMsg:
+		// Handle mouse wheel scrolling in describe view
+		if m.state.Mode == ViewModeDescribe {
+			switch msg.Type {
+			case tea.MouseWheelUp:
+				if m.state.ValueScrollOffset > 0 {
+					m.state.ValueScrollOffset--
+				}
+				return m, nil
+			case tea.MouseWheelDown:
+				m.state.ValueScrollOffset++
+				return m, nil
+			}
+		}
+		return m, nil
+
 	case tea.WindowSizeMsg:
 		m.state.Width = msg.Width
 		m.state.Height = msg.Height
@@ -173,6 +194,24 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.state.DescribeValue = msg.value
 		m.state.DescribeHistory = msg.history
 		m.state.HistoryIndex = 0
+		// Store param name for lazy loading
+		if m.state.DescribeEntry != nil {
+			m.state.DescribeParamName = m.state.DescribeEntry.Name
+		}
+		return m, nil
+
+	case versionValuesLoadedMsg:
+		// Update history entries with loaded values
+		for i := range m.state.DescribeHistory {
+			if value, ok := msg.versions[m.state.DescribeHistory[i].Version]; ok {
+				m.state.DescribeHistory[i].Value = value
+				m.state.DescribeHistory[i].ValueLoaded = true
+			}
+		}
+		// Update current displayed value if it was loaded
+		if m.state.HistoryIndex < len(m.state.DescribeHistory) {
+			m.state.DescribeValue = m.state.DescribeHistory[m.state.HistoryIndex].Value
+		}
 		return m, nil
 
 	case editCompleteMsg:
@@ -353,7 +392,8 @@ func (m Model) handleBrowseKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 			m.state.DescribeEntry = &entry
 			m.state.Mode = ViewModeDescribe
-			m.state.DescribeMasked = true // Start masked
+			// Use config to determine if value should be masked by default
+			m.state.DescribeMasked = !m.config.DecryptByDefault
 			return m, m.loadDescribe(paramName)
 		}
 		return m, nil
@@ -391,6 +431,9 @@ func (m Model) handleDescribeKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "esc", "q":
 		m.state.Mode = ViewModeList
+		// Reset scroll offsets
+		m.state.HistoryScrollOffset = 0
+		m.state.ValueScrollOffset = 0
 		return m, nil
 
 	case "x":
@@ -406,20 +449,84 @@ func (m Model) handleDescribeKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case "up", "k":
-		// Navigate to older version
-		if m.state.HistoryIndex < len(m.state.DescribeHistory)-1 {
-			m.state.HistoryIndex++
-			m.state.DescribeValue = m.state.DescribeHistory[m.state.HistoryIndex].Value
+		// Navigate to newer version (decrease index)
+		if m.state.HistoryIndex > 0 {
+			m.state.HistoryIndex--
+			// Update value and trigger lazy load if needed
+			return m.updateSelectedVersion()
 		}
 		return m, nil
 
 	case "down", "j":
-		// Navigate to newer version
-		if m.state.HistoryIndex > 0 {
-			m.state.HistoryIndex--
-			m.state.DescribeValue = m.state.DescribeHistory[m.state.HistoryIndex].Value
+		// Navigate to older version (increase index)
+		if m.state.HistoryIndex < len(m.state.DescribeHistory)-1 {
+			m.state.HistoryIndex++
+			// Update value and trigger lazy load if needed
+			return m.updateSelectedVersion()
 		}
 		return m, nil
+
+	case "pgup":
+		// Scroll value up
+		if m.state.ValueScrollOffset > 0 {
+			m.state.ValueScrollOffset--
+		}
+		return m, nil
+
+	case "pgdown":
+		// Scroll value down
+		m.state.ValueScrollOffset++
+		return m, nil
+	}
+
+	return m, nil
+}
+
+// updateSelectedVersion updates the displayed value and triggers lazy loading if needed
+func (m Model) updateSelectedVersion() (tea.Model, tea.Cmd) {
+	if m.state.HistoryIndex >= len(m.state.DescribeHistory) {
+		return m, nil
+	}
+
+	entry := &m.state.DescribeHistory[m.state.HistoryIndex]
+
+	// Adjust scroll to keep selection visible
+	if m.state.HistoryIndex < m.state.HistoryScrollOffset {
+		m.state.HistoryScrollOffset = m.state.HistoryIndex
+	}
+	maxVisible := 10 // Should match the rendering logic
+	if m.state.HistoryIndex >= m.state.HistoryScrollOffset+maxVisible {
+		m.state.HistoryScrollOffset = m.state.HistoryIndex - maxVisible + 1
+	}
+
+	// Reset value scroll when changing versions
+	m.state.ValueScrollOffset = 0
+
+	if entry.ValueLoaded {
+		// Value already loaded, just update display
+		m.state.DescribeValue = entry.Value
+		return m, nil
+	}
+
+	// Value not loaded, show loading message and trigger fetch
+	m.state.DescribeValue = "Loading..."
+
+	// Determine which versions need to be loaded
+	batchSize := m.config.DescribeVersionBatchSize
+	if batchSize <= 0 {
+		batchSize = 10
+	}
+
+	// Load a batch starting from current index
+	var versionsToLoad []int64
+	for i := m.state.HistoryIndex; i < len(m.state.DescribeHistory) && len(versionsToLoad) < batchSize; i++ {
+		if !m.state.DescribeHistory[i].ValueLoaded {
+			versionsToLoad = append(versionsToLoad, m.state.DescribeHistory[i].Version)
+		}
+	}
+
+	if len(versionsToLoad) > 0 {
+		return m, m.loadVersionValues(m.state.DescribeParamName, versionsToLoad)
 	}
 
 	return m, nil
@@ -500,7 +607,7 @@ func (m *Model) buildTree() {
 // loadDescribe loads describe data for a parameter
 func (m Model) loadDescribe(name string) tea.Cmd {
 	return func() tea.Msg {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 
 		// Validate parameter name
@@ -519,23 +626,54 @@ func (m Model) loadDescribe(name string) tea.Cmd {
 			return errorMsg(msg)
 		}
 
-		// Get history
-		history, err := m.client.GetParameterHistory(ctx, name, 3, true)
-		if err != nil {
-			// Continue without history
-			return describeLoadedMsg{
-				value:   param.Value,
-				history: []HistoryEntry{{Version: param.Version, Value: param.Value, Modified: param.LastModifiedDate.Format(time.RFC3339)}},
+		var historyEntries []HistoryEntry
+
+		// Check if we have cached version history
+		if cacheEntry, ok := m.cache.Get(name); ok && len(cacheEntry.VersionHistory) > 0 {
+			// Use cached history metadata and fetch values
+			allVersions, err := m.client.GetParameterHistory(ctx, name, 50, true)
+			if err != nil {
+				// Continue without history
+				return describeLoadedMsg{
+					value:   param.Value,
+					history: []HistoryEntry{{Version: param.Version, Value: param.Value, Modified: param.LastModifiedDate.Format(time.RFC3339), ValueLoaded: true}},
+				}
+			}
+
+			// Build history entries with all values
+			for _, h := range allVersions {
+				historyEntries = append(historyEntries, HistoryEntry{
+					Version:     h.Version,
+					Value:       h.Value,
+					Modified:    h.LastModifiedDate.Format(time.RFC3339),
+					ValueLoaded: true,
+				})
+			}
+		} else {
+			// No cached history, fetch from AWS
+			allVersions, err := m.client.GetParameterHistory(ctx, name, 50, true)
+			if err != nil {
+				// Continue without history
+				return describeLoadedMsg{
+					value:   param.Value,
+					history: []HistoryEntry{{Version: param.Version, Value: param.Value, Modified: param.LastModifiedDate.Format(time.RFC3339), ValueLoaded: true}},
+				}
+			}
+
+			// Build history entries with all values
+			for _, h := range allVersions {
+				historyEntries = append(historyEntries, HistoryEntry{
+					Version:     h.Version,
+					Value:       h.Value,
+					Modified:    h.LastModifiedDate.Format(time.RFC3339),
+					ValueLoaded: true,
+				})
 			}
 		}
 
-		var historyEntries []HistoryEntry
-		for _, h := range history {
-			historyEntries = append(historyEntries, HistoryEntry{
-				Version:  h.Version,
-				Value:    h.Value,
-				Modified: h.LastModifiedDate.Format(time.RFC3339),
-			})
+		// Reverse to show newest first
+		for i, j := 0, len(historyEntries)-1; i < j; i, j = i+1, j-1 {
+			historyEntries[i], historyEntries[j] = historyEntries[j], historyEntries[i]
 		}
 
 		return describeLoadedMsg{
@@ -696,6 +834,33 @@ func (m Model) handleConfirmKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.state.Confirm.ErrorMsg = ""
 		}
 		return m, nil
+	}
+}
+
+// loadVersionValues loads values for specific versions
+func (m Model) loadVersionValues(paramName string, versions []int64) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+
+		// Get history with decryption (max 50 per API limit)
+		history, err := m.client.GetParameterHistory(ctx, paramName, 50, true)
+		if err != nil {
+			return errorMsg("Failed to load version values: " + err.Error())
+		}
+
+		// Build map of version -> value for requested versions
+		versionMap := make(map[int64]string)
+		for _, h := range history {
+			for _, targetVersion := range versions {
+				if h.Version == targetVersion {
+					versionMap[targetVersion] = h.Value
+					break
+				}
+			}
+		}
+
+		return versionValuesLoadedMsg{versions: versionMap}
 	}
 }
 
