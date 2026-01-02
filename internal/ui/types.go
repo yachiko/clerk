@@ -27,14 +27,16 @@ type State struct {
 	SearchActive bool
 
 	// Describe view state
-	DescribeEntry       *cache.CacheEntry
-	DescribeParamName   string // Track parameter name for lazy loading
-	DescribeValue       string
-	DescribeMasked      bool
-	DescribeHistory     []HistoryEntry
-	HistoryIndex        int
-	HistoryScrollOffset int
-	ValueScrollOffset   int
+	DescribeEntry         *cache.CacheEntry
+	DescribeParamName     string // Track parameter name for lazy loading
+	DescribeValue         string
+	DescribeMasked        bool
+	DescribeHistory       []HistoryEntry
+	HistoryIndex          int
+	HistoryScrollOffset   int
+	ValueScrollOffset     int
+	ValueHorizontalScroll int  // Horizontal scroll position for value
+	ValueLineWrap         bool // Whether to wrap long lines in value
 
 	// Tree view state
 	TreeNodes     []TreeNode

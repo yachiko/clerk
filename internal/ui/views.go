@@ -291,7 +291,7 @@ func (m Model) renderDescribeView() string {
 	output = append(output, statusLine)
 
 	// Help
-	help := "x:toggle-mask  c:copy  ↑↓:version  PgUp/PgDn:scroll-value  esc:back  q:quit"
+	help := "x:mask  c:copy  tab/⇧tab:version  ↑↓:scroll  ←→:horiz  w:wrap  esc:back  q:quit"
 	output = append(output, helpStyle.Render(help))
 
 	return strings.Join(output, "\n")
@@ -399,18 +399,59 @@ func (m Model) renderValuePanel(width, height int) string {
 			end = len(valueLines)
 		}
 
-		// Render visible lines with proper wrapping for width
+		// Render visible lines with wrapping or horizontal scrolling
 		contentWidth := width - 4 // Account for border and padding
 		for i := start; i < end; i++ {
 			line := valueLines[i]
-			// Wrap long lines
-			if len(line) > contentWidth {
-				line = line[:contentWidth-3] + "..."
-			}
-			if m.state.DescribeMasked {
-				lines = append(lines, maskedStyle.Render(line))
+
+			if m.state.ValueLineWrap {
+				// Wrap mode: split long lines to fit width
+				if len(line) <= contentWidth {
+					if m.state.DescribeMasked {
+						lines = append(lines, maskedStyle.Render(line))
+					} else {
+						lines = append(lines, valueStyle.Render(line))
+					}
+				} else {
+					// Wrap at contentWidth boundaries
+					for pos := 0; pos < len(line); pos += contentWidth {
+						endPos := pos + contentWidth
+						if endPos > len(line) {
+							endPos = len(line)
+						}
+						chunk := line[pos:endPos]
+						if m.state.DescribeMasked {
+							lines = append(lines, maskedStyle.Render(chunk))
+						} else {
+							lines = append(lines, valueStyle.Render(chunk))
+						}
+					}
+				}
 			} else {
-				lines = append(lines, valueStyle.Render(line))
+				// Scroll mode: apply horizontal offset
+				if len(line) > contentWidth {
+					hscroll := m.state.ValueHorizontalScroll
+					if hscroll < len(line) {
+						endPos := hscroll + contentWidth
+						if endPos > len(line) {
+							endPos = len(line)
+						}
+						visiblePart := line[hscroll:endPos]
+						if m.state.DescribeMasked {
+							lines = append(lines, maskedStyle.Render(visiblePart))
+						} else {
+							lines = append(lines, valueStyle.Render(visiblePart))
+						}
+					} else {
+						lines = append(lines, "")
+					}
+				} else {
+					if m.state.DescribeMasked {
+						lines = append(lines, maskedStyle.Render(line))
+					} else {
+						lines = append(lines, valueStyle.Render(line))
+					}
+				}
 			}
 		}
 	}
@@ -428,6 +469,12 @@ func (m Model) renderValuePanel(width, height int) string {
 				m.state.ValueScrollOffset+1,
 				min(m.state.ValueScrollOffset+height-5, len(valueLines)),
 				len(valueLines))
+
+			// Add horizontal scroll indicator if applicable
+			if !m.state.ValueLineWrap && m.state.ValueHorizontalScroll > 0 {
+				scrollInfo += fmt.Sprintf(" (col %d+)", m.state.ValueHorizontalScroll)
+			}
+
 			lines = append(lines, dimStyle.Render(scrollInfo))
 		} else {
 			lines = append(lines, "")
