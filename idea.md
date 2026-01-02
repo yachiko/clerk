@@ -123,3 +123,6 @@ Config kep in json file located at $HOME/.clerk/config.json.
 Only Parameter Store is supported, no support for AWS Secrets Manager.
 Single region only.
 Handle Ctrl+c gracefully, exit the tool without leaving temp files or corrupted state.
+Only plain and json output formats are supported.
+The project artifact should be a single binary executable for easy distribution and installation.
+Package Github repo will be named github.com/yachiko/clerk.
