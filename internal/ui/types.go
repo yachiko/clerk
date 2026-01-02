@@ -27,11 +27,14 @@ type State struct {
 	SearchActive bool
 
 	// Describe view state
-	DescribeEntry   *cache.CacheEntry
-	DescribeValue   string
-	DescribeMasked  bool
-	DescribeHistory []HistoryEntry
-	HistoryIndex    int
+	DescribeEntry       *cache.CacheEntry
+	DescribeParamName   string // Track parameter name for lazy loading
+	DescribeValue       string
+	DescribeMasked      bool
+	DescribeHistory     []HistoryEntry
+	HistoryIndex        int
+	HistoryScrollOffset int
+	ValueScrollOffset   int
 
 	// Tree view state
 	TreeNodes     []TreeNode
@@ -51,9 +54,10 @@ type State struct {
 
 // HistoryEntry represents a version history entry
 type HistoryEntry struct {
-	Version  int64
-	Value    string
-	Modified string
+	Version     int64
+	Value       string
+	Modified    string
+	ValueLoaded bool // Whether the value has been fetched
 }
 
 // TreeNode represents a node in the tree view

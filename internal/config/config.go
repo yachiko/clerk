@@ -106,6 +106,10 @@ func (m *Manager) GetValue(key string) (string, error) {
 		return strconv.Itoa(int(m.config.DescribePageSize)), nil
 	case "describe_max_items", "describe.max.items":
 		return strconv.Itoa(int(m.config.DescribeMaxItems)), nil
+	case "describe_version_batch_size", "describe.version.batch.size":
+		return strconv.Itoa(m.config.DescribeVersionBatchSize), nil
+	case "decrypt_by_default", "decrypt.by.default":
+		return strconv.FormatBool(m.config.DecryptByDefault), nil
 	default:
 		return "", fmt.Errorf("unknown configuration key: %s", key)
 	}
@@ -166,6 +170,18 @@ func (m *Manager) SetValue(key, value string) error {
 			return fmt.Errorf("describe_max_items must be >= 0 (0 = unlimited)")
 		}
 		m.config.DescribeMaxItems = int32(n)
+	case "describe_version_batch_size", "describe.version.batch.size":
+		n, err := strconv.Atoi(value)
+		if err != nil || n < 1 {
+			return fmt.Errorf("describe_version_batch_size must be >= 1")
+		}
+		m.config.DescribeVersionBatchSize = n
+	case "decrypt_by_default", "decrypt.by.default":
+		b, err := strconv.ParseBool(value)
+		if err != nil {
+			return fmt.Errorf("invalid boolean value for decrypt_by_default: %w", err)
+		}
+		m.config.DecryptByDefault = b
 	default:
 		return fmt.Errorf("unknown configuration key: %s", key)
 	}
@@ -186,6 +202,8 @@ func (m *Manager) ListKeys() []string {
 		"search_slash_prefix",
 		"describe_page_size",
 		"describe_max_items",
+		"describe_version_batch_size",
+		"decrypt_by_default",
 	}
 }
 

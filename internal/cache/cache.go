@@ -266,7 +266,7 @@ func (m *Manager) Refresh(ctx context.Context, client *aws.Client, region string
 
 			// Check if we can reuse cached entry (same version = unchanged)
 			if existing, ok := existingByName[p.Name]; ok && existing.Version == p.Version {
-				// Reuse cached entry - no need to fetch tags
+				// Reuse cached entry - no need to fetch tags or history
 				mu.Lock()
 				entries = append(entries, existing)
 				completed++
@@ -289,6 +289,19 @@ func (m *Manager) Refresh(ctx context.Context, client *aws.Client, region string
 			tags, err := client.GetParameterTags(ctx, p.Name)
 			if err == nil {
 				entry.Tags = tags
+			}
+
+			// Fetch version history for parameters with version > 1
+			if p.Version > 1 {
+				history, err := client.GetParameterHistory(ctx, p.Name, 50, false)
+				if err == nil {
+					for _, h := range history {
+						entry.VersionHistory = append(entry.VersionHistory, VersionHistoryEntry{
+							Version:  h.Version,
+							Modified: h.LastModifiedDate,
+						})
+					}
+				}
 			}
 
 			mu.Lock()
