@@ -39,6 +39,7 @@ func NewModel(client *aws.Client, cacheMgr *cache.Manager, cfg *config.Config) M
 			Mode:          ViewModeList,
 			PreviousMode:  ViewModeList,
 			ExpandedPaths: make(map[string]bool),
+			SortType:      SortByName,
 		},
 		client:      client,
 		cache:       cacheMgr,
@@ -89,6 +90,18 @@ type editCompleteMsg struct {
 type deleteCompleteMsg struct {
 	name string
 	err  error
+}
+
+type moveCompleteMsg struct {
+	source string
+	target string
+	err    error
+}
+
+type copyCompleteMsg struct {
+	source string
+	target string
+	err    error
 }
 
 // Update implements tea.Model
@@ -146,8 +159,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleKeyPress(msg)
 
 	case tea.MouseMsg:
-		// Handle mouse wheel scrolling in describe view
+		// Handle mouse wheel scrolling
 		if m.state.Mode == ViewModeDescribe {
+			// Describe view: scroll value vertically or horizontally
 			switch msg.Type {
 			case tea.MouseWheelUp:
 				// Shift + wheel: horizontal scroll
@@ -169,6 +183,26 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				} else {
 					// Normal wheel: vertical scroll
 					m.state.ValueScrollOffset++
+				}
+				return m, nil
+			}
+		} else if m.state.Mode == ViewModeList || m.state.Mode == ViewModeTree {
+			// Browse view: scroll through entries
+			switch msg.Type {
+			case tea.MouseWheelUp:
+				if m.state.SelectedIndex > 0 {
+					m.state.SelectedIndex--
+					m.adjustScroll()
+				}
+				return m, nil
+			case tea.MouseWheelDown:
+				maxIndex := len(m.state.FilteredItems) - 1
+				if m.state.Mode == ViewModeTree {
+					maxIndex = len(m.state.TreeNodes) - 1
+				}
+				if m.state.SelectedIndex < maxIndex {
+					m.state.SelectedIndex++
+					m.adjustScroll()
 				}
 				return m, nil
 			}
@@ -260,21 +294,45 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, func() tea.Msg { return errorMsg("Delete failed: " + msg.err.Error()) }
 		}
 
-		// Remove from local entries
-		for i := range m.state.Entries {
-			if m.state.Entries[i].Name == msg.name {
-				m.state.Entries = append(m.state.Entries[:i], m.state.Entries[i+1:]...)
-				break
-			}
-		}
-		m.filterEntries()
-
 		// Remove from cache
 		_ = m.cache.Delete(msg.name)
 
-		return m, func() tea.Msg {
-			return statusMsg(fmt.Sprintf("Deleted %s", msg.name))
+		// Reload entries from cache
+		return m, tea.Batch(
+			m.loadEntries,
+			func() tea.Msg {
+				return statusMsg(fmt.Sprintf("Deleted %s", msg.name))
+			},
+		)
+
+	case moveCompleteMsg:
+		if msg.err != nil {
+			return m, func() tea.Msg { return errorMsg("Move failed: " + msg.err.Error()) }
 		}
+
+		// Remove from cache
+		_ = m.cache.Delete(msg.source)
+
+		// Reload entries from cache
+		return m, tea.Batch(
+			m.loadEntries,
+			func() tea.Msg {
+				return statusMsg(fmt.Sprintf("Moved %s to %s", msg.source, msg.target))
+			},
+		)
+
+	case copyCompleteMsg:
+		if msg.err != nil {
+			return m, func() tea.Msg { return errorMsg("Copy failed: " + msg.err.Error()) }
+		}
+
+		// Reload entries from cache
+		return m, tea.Batch(
+			m.loadEntries,
+			func() tea.Msg {
+				return statusMsg(fmt.Sprintf("Copied %s to %s", msg.source, msg.target))
+			},
+		)
 	}
 
 	return m, tea.Batch(cmds...)
@@ -383,6 +441,19 @@ func (m Model) handleBrowseKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.state.PreviousMode = m.state.Mode
 		return m, nil
 
+	case "s":
+		// Cycle through sort options: name -> modified -> version -> name
+		switch m.state.SortType {
+		case SortByName:
+			m.state.SortType = SortByModified
+		case SortByModified:
+			m.state.SortType = SortByVersion
+		case SortByVersion:
+			m.state.SortType = SortByName
+		}
+		m.sortEntries()
+		return m, nil
+
 	case " ":
 		// Toggle expand/collapse in tree view
 		if m.state.Mode == ViewModeTree && len(m.state.TreeNodes) > 0 {
@@ -437,6 +508,30 @@ func (m Model) handleBrowseKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		entry := m.getSelectedEntry()
 		if entry != nil {
 			return m, m.initiateDelete(entry.Name)
+		}
+		return m, nil
+
+	case "m":
+		// Move/rename
+		entry := m.getSelectedEntry()
+		if entry != nil {
+			m.state.Confirm = ConfirmState{
+				Active: true,
+				Action: "move",
+				Target: entry.Name,
+			}
+		}
+		return m, nil
+
+	case "p":
+		// Copy
+		entry := m.getSelectedEntry()
+		if entry != nil {
+			m.state.Confirm = ConfirmState{
+				Active: true,
+				Action: "copy",
+				Target: entry.Name,
+			}
 		}
 		return m, nil
 	}
@@ -520,29 +615,47 @@ func (m Model) handleDescribeKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
-	case "up", "k":
+	case "g":
+		// Jump to latest version (go to latest)
+		if m.state.HistoryIndex != 0 {
+			m.state.HistoryIndex = 0
+			// Update value and trigger lazy load if needed
+			return m.updateSelectedVersion()
+		}
+		return m, nil
+
+	case "up":
 		// Scroll value up
 		if m.state.ValueScrollOffset > 0 {
 			m.state.ValueScrollOffset--
 		}
 		return m, nil
 
-	case "down", "j":
+	case "down":
 		// Scroll value down
 		m.state.ValueScrollOffset++
 		return m, nil
 
-	case "left", "h":
+	case "left":
 		// Scroll horizontally left
 		if !m.state.ValueLineWrap && m.state.ValueHorizontalScroll > 0 {
 			m.state.ValueHorizontalScroll--
 		}
 		return m, nil
 
-	case "right", "l":
+	case "right":
 		// Scroll horizontally right
 		if !m.state.ValueLineWrap {
 			m.state.ValueHorizontalScroll++
+		}
+		return m, nil
+
+	case "l":
+		// Jump to latest version
+		if m.state.HistoryIndex != 0 {
+			m.state.HistoryIndex = 0
+			// Update value and trigger lazy load if needed
+			return m.updateSelectedVersion()
 		}
 		return m, nil
 
@@ -613,7 +726,7 @@ func (m Model) updateSelectedVersion() (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// filterEntries filters entries based on search query
+// filterEntries filters and sorts entries based on search query and sort order
 func (m *Model) filterEntries() {
 	if m.state.SearchQuery == "" {
 		m.state.FilteredItems = m.state.Entries
@@ -627,12 +740,66 @@ func (m *Model) filterEntries() {
 		m.state.FilteredItems = filtered
 	}
 
+	// Apply sorting
+	m.sortEntries()
+
 	// Reset selection if out of bounds
 	if m.state.SelectedIndex >= len(m.state.FilteredItems) {
 		m.state.SelectedIndex = len(m.state.FilteredItems) - 1
 	}
 	if m.state.SelectedIndex < 0 {
 		m.state.SelectedIndex = 0
+	}
+}
+
+// sortEntries sorts FilteredItems based on the current sort type
+func (m *Model) sortEntries() {
+	if len(m.state.FilteredItems) == 0 {
+		return
+	}
+
+	switch m.state.SortType {
+	case SortByName:
+		// Sort by name (ascending)
+		for i := 0; i < len(m.state.FilteredItems)-1; i++ {
+			for j := i + 1; j < len(m.state.FilteredItems); j++ {
+				if m.state.FilteredItems[j].Name < m.state.FilteredItems[i].Name {
+					m.state.FilteredItems[i], m.state.FilteredItems[j] = m.state.FilteredItems[j], m.state.FilteredItems[i]
+				}
+			}
+		}
+	case SortByModified:
+		// Sort by last modified date (newest first)
+		for i := 0; i < len(m.state.FilteredItems)-1; i++ {
+			for j := i + 1; j < len(m.state.FilteredItems); j++ {
+				if m.state.FilteredItems[j].LastModifiedDate.After(m.state.FilteredItems[i].LastModifiedDate) {
+					m.state.FilteredItems[i], m.state.FilteredItems[j] = m.state.FilteredItems[j], m.state.FilteredItems[i]
+				}
+			}
+		}
+	case SortByVersion:
+		// Sort by version (highest first)
+		for i := 0; i < len(m.state.FilteredItems)-1; i++ {
+			for j := i + 1; j < len(m.state.FilteredItems); j++ {
+				if m.state.FilteredItems[j].Version > m.state.FilteredItems[i].Version {
+					m.state.FilteredItems[i], m.state.FilteredItems[j] = m.state.FilteredItems[j], m.state.FilteredItems[i]
+				}
+			}
+		}
+	}
+}
+
+// getSortLabel returns a human-readable label for the current sort type
+func (m *Model) getSortLabel() string {
+	switch m.state.SortType {
+	case SortByName:
+		return "name"
+	case SortByModified:
+		return "modified"
+	case SortByVersion:
+		return "version"
+	default:
+		return "unknown"
 	}
 }
 
@@ -879,6 +1046,76 @@ func (m Model) deleteSecret(name string) tea.Cmd {
 	}
 }
 
+// moveSecret moves/renames a parameter
+func (m Model) moveSecret(source, target string) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+
+		// Get source parameter
+		param, err := m.client.GetParameter(ctx, source, true)
+		if err != nil {
+			return moveCompleteMsg{source: source, target: target, err: fmt.Errorf("failed to get source: %w", err)}
+		}
+
+		// Create new parameter at target location
+		input := &aws.PutParameterInput{
+			Name:      target,
+			Value:     param.Value,
+			Type:      param.Type,
+			Overwrite: true,
+		}
+		if len(param.Tags) > 0 {
+			input.Tags = param.Tags
+		}
+
+		_, err = m.client.PutParameter(ctx, input)
+		if err != nil {
+			return moveCompleteMsg{source: source, target: target, err: fmt.Errorf("failed to create target: %w", err)}
+		}
+
+		// Delete source parameter
+		err = m.client.DeleteParameter(ctx, source)
+		if err != nil {
+			return moveCompleteMsg{source: source, target: target, err: fmt.Errorf("failed to delete source: %w", err)}
+		}
+
+		return moveCompleteMsg{source: source, target: target}
+	}
+}
+
+// copySecretAs copies a parameter to a new name
+func (m Model) copySecretAs(source, target string) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+
+		// Get source parameter
+		param, err := m.client.GetParameter(ctx, source, true)
+		if err != nil {
+			return copyCompleteMsg{source: source, target: target, err: fmt.Errorf("failed to get source: %w", err)}
+		}
+
+		// Create new parameter at target location
+		input := &aws.PutParameterInput{
+			Name:      target,
+			Value:     param.Value,
+			Type:      param.Type,
+			Overwrite: true,
+		}
+		if len(param.Tags) > 0 {
+			input.Tags = param.Tags
+		}
+
+		_, err = m.client.PutParameter(ctx, input)
+		if err != nil {
+			return copyCompleteMsg{source: source, target: target, err: fmt.Errorf("failed to copy: %w", err)}
+		}
+
+		return copyCompleteMsg{source: source, target: target}
+	}
+}
+
 // handleConfirmKeys handles keyboard input during confirmation
 func (m Model) handleConfirmKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
@@ -887,13 +1124,37 @@ func (m Model) handleConfirmKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case "enter":
-		if m.state.Confirm.Input == m.state.Confirm.ConfirmText {
-			// Confirmed - execute delete
-			name := m.state.Confirm.Target
+		// Handle different confirmation types
+		if m.state.Confirm.Action == "delete" {
+			// For delete, check confirmation text
+			if m.state.Confirm.Input == m.state.Confirm.ConfirmText {
+				name := m.state.Confirm.Target
+				m.state.Confirm = ConfirmState{}
+				return m, m.deleteSecret(name)
+			}
+			m.state.Confirm.ErrorMsg = "Incorrect confirmation text"
+			return m, nil
+		} else if m.state.Confirm.Action == "move" {
+			// For move, target is the new name
+			if m.state.Confirm.Input == "" {
+				m.state.Confirm.ErrorMsg = "Target name cannot be empty"
+				return m, nil
+			}
+			source := m.state.Confirm.Target
+			target := m.state.Confirm.Input
 			m.state.Confirm = ConfirmState{}
-			return m, m.deleteSecret(name)
+			return m, m.moveSecret(source, target)
+		} else if m.state.Confirm.Action == "copy" {
+			// For copy, target is the new name
+			if m.state.Confirm.Input == "" {
+				m.state.Confirm.ErrorMsg = "Target name cannot be empty"
+				return m, nil
+			}
+			source := m.state.Confirm.Target
+			target := m.state.Confirm.Input
+			m.state.Confirm = ConfirmState{}
+			return m, m.copySecretAs(source, target)
 		}
-		m.state.Confirm.ErrorMsg = "Incorrect confirmation text"
 		return m, nil
 
 	case "backspace":

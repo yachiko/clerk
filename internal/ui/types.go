@@ -11,6 +11,15 @@ const (
 	ViewModeDescribe
 )
 
+// SortType represents the sort order
+type SortType int
+
+const (
+	SortByName SortType = iota
+	SortByModified
+	SortByVersion
+)
+
 // State represents the UI state
 type State struct {
 	// Data
@@ -26,6 +35,9 @@ type State struct {
 	// Search
 	SearchQuery  string
 	SearchActive bool
+
+	// Sorting
+	SortType SortType
 
 	// Describe view state
 	DescribeEntry         *cache.CacheEntry
@@ -77,9 +89,9 @@ type TreeNode struct {
 // ConfirmState represents confirmation dialog state
 type ConfirmState struct {
 	Active      bool
-	Action      string // "delete"
+	Action      string // "delete", "move", "copy"
 	Target      string // parameter name
-	ConfirmText string // text user must type
+	ConfirmText string // text user must type (for delete)
 	Input       string // current input
 	ErrorMsg    string
 }

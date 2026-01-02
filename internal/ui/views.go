@@ -105,8 +105,26 @@ func (m Model) renderBrowseView() string {
 		lines = append(lines, "")
 	}
 
-	// Header
-	header := headerStyle.Render(fmt.Sprintf("%-60s %-12s %8s", "NAME", "TYPE", "VERSION"))
+	// Header - varies based on width
+	showModified := m.state.Width >= 100 // Show modified column if width >= 100
+	var header string
+	var nameWidth int
+
+	if showModified {
+		// Fixed: 3 (spaces) + 12 (TYPE) + 3 (spaces) + 8 (VERSION) + 3 (spaces) + 16 (MODIFIED) + 2 (padding) = 47
+		nameWidth = m.state.Width - 47
+		if nameWidth < 20 {
+			nameWidth = 20 // Minimum width for name
+		}
+		header = headerStyle.Render(fmt.Sprintf("%-*s   %-12s   %8s   %16s  ", nameWidth, "NAME", "TYPE", "VERSION", "MODIFIED"))
+	} else {
+		// Fixed: 3 (spaces) + 12 (TYPE) + 3 (spaces) + 8 (VERSION) = 26
+		nameWidth = m.state.Width - 26
+		if nameWidth < 20 {
+			nameWidth = 20 // Minimum width for name
+		}
+		header = headerStyle.Render(fmt.Sprintf("%-*s   %-12s   %8s", nameWidth, "NAME", "TYPE", "VERSION"))
+	}
 	lines = append(lines, header)
 	lines = append(lines, strings.Repeat("─", m.state.Width-2))
 
@@ -132,11 +150,11 @@ func (m Model) renderBrowseView() string {
 		var itemLines []string
 		if m.state.Mode == ViewModeTree {
 			b := &strings.Builder{}
-			m.renderTreeItems(b, start, end)
+			m.renderTreeItems(b, start, end, showModified)
 			itemLines = strings.Split(strings.TrimSuffix(b.String(), "\n"), "\n")
 		} else {
 			b := &strings.Builder{}
-			m.renderListItems(b, start, end)
+			m.renderListItems(b, start, end, showModified)
 			itemLines = strings.Split(strings.TrimSuffix(b.String(), "\n"), "\n")
 		}
 		lines = append(lines, itemLines...)
@@ -163,20 +181,49 @@ func (m Model) renderBrowseView() string {
 	}
 	lines = append(lines, statusLine)
 
-	// Help line
-	help := "↑↓:navigate  d:describe  e:edit  c:copy  t:tree  /:search  q:quit"
+	// Help line - varies by view mode
+	var help string
+	sortLabel := m.getSortLabel()
+	if m.state.Mode == ViewModeTree {
+		help = fmt.Sprintf("↑↓:navigate  d:describe  e:edit  c:copy  m:move  p:copy  space:expand  s:sort(%s)  /:search  q:quit", sortLabel)
+	} else {
+		help = fmt.Sprintf("↑↓:navigate  d:describe  e:edit  c:copy  m:move  p:copy  t:tree  s:sort(%s)  /:search  q:quit", sortLabel)
+	}
 	lines = append(lines, helpStyle.Render(help))
 
 	return strings.Join(lines, "\n")
 }
 
 // renderListItems renders items in flat list view
-func (m Model) renderListItems(b *strings.Builder, start, end int) {
+func (m Model) renderListItems(b *strings.Builder, start, end int, showModified bool) {
+	// Calculate name width based on terminal width
+	var nameWidth int
+	if showModified {
+		// Fixed: 3 (spaces) + 12 (TYPE) + 3 (spaces) + 8 (VERSION) + 3 (spaces) + 16 (MODIFIED) + 2 (padding) = 47
+		nameWidth = m.state.Width - 47
+		if nameWidth < 20 {
+			nameWidth = 20
+		}
+	} else {
+		// Fixed: 3 (spaces) + 12 (TYPE) + 3 (spaces) + 8 (VERSION) = 26
+		nameWidth = m.state.Width - 26
+		if nameWidth < 20 {
+			nameWidth = 20
+		}
+	}
+
 	for i := start; i < end; i++ {
 		entry := m.state.FilteredItems[i]
 
-		name := truncateString(entry.Name, 58)
-		line := fmt.Sprintf("%-60s %-12s %8d", name, entry.Type, entry.Version)
+		var line string
+		if showModified {
+			name := truncateString(entry.Name, nameWidth-2) // -2 for padding
+			modifiedStr := entry.LastModifiedDate.Format("2006-01-02 15:04")
+			line = fmt.Sprintf("%-*s   %-12s   %8d   %16s  ", nameWidth, name, entry.Type, entry.Version, modifiedStr)
+		} else {
+			name := truncateString(entry.Name, nameWidth-2) // -2 for padding
+			line = fmt.Sprintf("%-*s   %-12s   %8d", nameWidth, name, entry.Type, entry.Version)
+		}
 
 		if i == m.state.SelectedIndex {
 			b.WriteString(selectedStyle.Render(line))
@@ -188,9 +235,25 @@ func (m Model) renderListItems(b *strings.Builder, start, end int) {
 }
 
 // renderTreeItems renders items in tree view
-func (m Model) renderTreeItems(b *strings.Builder, start, end int) {
+func (m Model) renderTreeItems(b *strings.Builder, start, end int, showModified bool) {
 	if len(m.state.TreeNodes) == 0 {
 		return
+	}
+
+	// Calculate name width based on terminal width and fixed columns
+	var nameWidth int
+	if showModified {
+		// Fixed: 3 (spaces) + 12 (TYPE) + 3 (spaces) + 8 (VERSION) + 3 (spaces) + 16 (MODIFIED) + 2 (padding) = 47
+		nameWidth = m.state.Width - 47
+		if nameWidth < 20 {
+			nameWidth = 20
+		}
+	} else {
+		// Fixed: 3 (spaces) + 12 (TYPE) + 3 (spaces) + 8 (VERSION) = 26
+		nameWidth = m.state.Width - 26
+		if nameWidth < 20 {
+			nameWidth = 20
+		}
 	}
 
 	for i := start; i < end && i < len(m.state.TreeNodes); i++ {
@@ -216,11 +279,28 @@ func (m Model) renderTreeItems(b *strings.Builder, start, end int) {
 			if node.ChildCount > 0 {
 				dirName += fmt.Sprintf(" (%d)", node.ChildCount)
 			}
-			line = fmt.Sprintf("%s%s%-50s", indent, prefix, dirName)
+			// For directories, use dynamic width considering indent
+			dirNameWidth := nameWidth - len(indent) - 2
+			if dirNameWidth < 10 {
+				dirNameWidth = 10
+			}
+			line = fmt.Sprintf("%s%s%-*s", indent, prefix, dirNameWidth, dirName)
 		} else {
 			entry := node.Entry
-			name := truncateString(node.Name, 48-node.Depth*2)
-			line = fmt.Sprintf("%s%s%-50s %-12s %8d", indent, prefix, name, entry.Type, entry.Version)
+			// Account for indent when calculating available space
+			availableWidth := nameWidth - len(indent) - 2
+			if availableWidth < 10 {
+				availableWidth = 10
+			}
+
+			if showModified {
+				name := truncateString(node.Name, availableWidth-2)
+				modifiedStr := entry.LastModifiedDate.Format("2006-01-02 15:04")
+				line = fmt.Sprintf("%s%s%-*s   %-12s   %8d   %16s  ", indent, prefix, availableWidth, name, entry.Type, entry.Version, modifiedStr)
+			} else {
+				name := truncateString(node.Name, availableWidth-2)
+				line = fmt.Sprintf("%s%s%-*s   %-12s   %8d", indent, prefix, availableWidth, name, entry.Type, entry.Version)
+			}
 		}
 
 		if i == m.state.SelectedIndex {
@@ -291,7 +371,7 @@ func (m Model) renderDescribeView() string {
 	output = append(output, statusLine)
 
 	// Help
-	help := "x:mask  c:copy  e:edit  tab/⇧tab:version  ↑↓:scroll  ←→:horiz  w:wrap  esc:back  q:quit"
+	help := "x:mask  c:copy  e:edit  tab/⇧tab:version  l:latest  ↑↓:scroll  ←→:horiz  w:wrap  esc:back  q:quit"
 	output = append(output, helpStyle.Render(help))
 
 	return strings.Join(output, "\n")
@@ -533,13 +613,29 @@ func (m Model) renderDescribeBox(entry *cache.CacheEntry) string {
 func (m Model) renderConfirmDialog() string {
 	var b strings.Builder
 
-	b.WriteString(warningStyle.Render("⚠ CONFIRM DELETE"))
-	b.WriteString("\n\n")
-	b.WriteString(fmt.Sprintf("You are about to delete:\n%s\n\n", m.state.Confirm.Target))
-	b.WriteString(warningStyle.Render("This action cannot be undone!"))
-	b.WriteString("\n\n")
-	b.WriteString(promptStyle.Render(fmt.Sprintf("Type '%s' to confirm: ", m.state.Confirm.ConfirmText)))
-	b.WriteString(inputStyle.Render(m.state.Confirm.Input))
+	action := m.state.Confirm.Action
+	if action == "delete" {
+		b.WriteString(warningStyle.Render("⚠ CONFIRM DELETE"))
+		b.WriteString("\n\n")
+		b.WriteString(fmt.Sprintf("You are about to delete:\n%s\n\n", m.state.Confirm.Target))
+		b.WriteString(warningStyle.Render("This action cannot be undone!"))
+		b.WriteString("\n\n")
+		b.WriteString(promptStyle.Render(fmt.Sprintf("Type '%s' to confirm: ", m.state.Confirm.ConfirmText)))
+		b.WriteString(inputStyle.Render(m.state.Confirm.Input))
+	} else if action == "move" {
+		b.WriteString(warningStyle.Render("MOVE/RENAME PARAMETER"))
+		b.WriteString("\n\n")
+		b.WriteString(fmt.Sprintf("From: %s\n\n", m.state.Confirm.Target))
+		b.WriteString(promptStyle.Render("To: "))
+		b.WriteString(inputStyle.Render(m.state.Confirm.Input))
+	} else if action == "copy" {
+		b.WriteString(warningStyle.Render("COPY PARAMETER"))
+		b.WriteString("\n\n")
+		b.WriteString(fmt.Sprintf("From: %s\n\n", m.state.Confirm.Target))
+		b.WriteString(promptStyle.Render("To: "))
+		b.WriteString(inputStyle.Render(m.state.Confirm.Input))
+	}
+
 	b.WriteString("█") // cursor
 
 	if m.state.Confirm.ErrorMsg != "" {
