@@ -98,9 +98,9 @@ func (m Model) renderBrowseView() string {
 
 	// Search bar (always visible, fixed at top)
 	if m.state.SearchActive {
-		lines = append(lines, searchStyle.Render("🔍 ")+m.searchInput.View())
+		lines = append(lines, "  "+searchStyle.Render("🔍 ")+m.searchInput.View())
 	} else if m.state.SearchQuery != "" {
-		lines = append(lines, dimStyle.Render(fmt.Sprintf("Filter: %s (/ to edit)", m.state.SearchQuery)))
+		lines = append(lines, dimStyle.Render("  Filter: "+m.state.SearchQuery+" (/ to edit)"))
 	} else {
 		lines = append(lines, "")
 	}
@@ -112,21 +112,21 @@ func (m Model) renderBrowseView() string {
 
 	if showModified {
 		// Fixed: 3 (spaces) + 12 (TYPE) + 3 (spaces) + 8 (VERSION) + 3 (spaces) + 16 (MODIFIED) + 2 (padding) = 47
-		nameWidth = m.state.Width - 47
+		nameWidth = m.state.Width - 47 - 2 // -2 for left padding
 		if nameWidth < 20 {
 			nameWidth = 20 // Minimum width for name
 		}
-		header = headerStyle.Render(fmt.Sprintf("%-*s   %-12s   %8s   %16s  ", nameWidth, "NAME", "TYPE", "VERSION", "MODIFIED"))
+		header = headerStyle.Render(fmt.Sprintf("  %-*s   %-12s   %8s   %16s  ", nameWidth, "NAME", "TYPE", "VERSION", "MODIFIED"))
 	} else {
 		// Fixed: 3 (spaces) + 12 (TYPE) + 3 (spaces) + 8 (VERSION) = 26
-		nameWidth = m.state.Width - 26
+		nameWidth = m.state.Width - 26 - 2 // -2 for left padding
 		if nameWidth < 20 {
 			nameWidth = 20 // Minimum width for name
 		}
-		header = headerStyle.Render(fmt.Sprintf("%-*s   %-12s   %8s", nameWidth, "NAME", "TYPE", "VERSION"))
+		header = headerStyle.Render(fmt.Sprintf("  %-*s   %-12s   %8s", nameWidth, "NAME", "TYPE", "VERSION"))
 	}
 	lines = append(lines, header)
-	lines = append(lines, strings.Repeat("─", m.state.Width-2))
+	lines = append(lines, "  "+strings.Repeat("─", m.state.Width-4))
 
 	// Items - calculate how many we can show
 	visible := m.visibleRows()
@@ -135,7 +135,7 @@ func (m Model) renderBrowseView() string {
 	}
 
 	if len(m.state.FilteredItems) == 0 {
-		lines = append(lines, dimStyle.Render("  No parameters found"))
+		lines = append(lines, dimStyle.Render("    No parameters found"))
 		// Pad with empty lines to fill space
 		for i := len(lines); i < m.state.Height-2; i++ {
 			lines = append(lines, "")
@@ -166,18 +166,18 @@ func (m Model) renderBrowseView() string {
 	}
 
 	// Footer (always at bottom)
-	lines = append(lines, strings.Repeat("─", m.state.Width-2))
+	lines = append(lines, "  "+strings.Repeat("─", m.state.Width-4))
 
 	// Status/Error message
 	var statusLine string
 	if m.state.ErrorMessage != "" {
-		statusLine = errorStyle.Render("✗ " + m.state.ErrorMessage)
+		statusLine = errorStyle.Render("  ✗ " + m.state.ErrorMessage)
 	} else if m.state.StatusMessage != "" {
-		statusLine = statusStyle.Render("✓ " + m.state.StatusMessage)
+		statusLine = statusStyle.Render("  ✓ " + m.state.StatusMessage)
 	} else {
 		// Stats
 		stats := fmt.Sprintf("%d/%d parameters", len(m.state.FilteredItems), len(m.state.Entries))
-		statusLine = dimStyle.Render(stats)
+		statusLine = dimStyle.Render("  " + stats)
 	}
 	lines = append(lines, statusLine)
 
@@ -189,7 +189,7 @@ func (m Model) renderBrowseView() string {
 	} else {
 		help = fmt.Sprintf("↑↓:navigate  d:describe  e:edit  c:copy  m:move  p:copy  t:tree  s:sort(%s)  /:search  q:quit", sortLabel)
 	}
-	lines = append(lines, helpStyle.Render(help))
+	lines = append(lines, helpStyle.Render("  "+help+"  "))
 
 	return strings.Join(lines, "\n")
 }
@@ -200,13 +200,13 @@ func (m Model) renderListItems(b *strings.Builder, start, end int, showModified 
 	var nameWidth int
 	if showModified {
 		// Fixed: 3 (spaces) + 12 (TYPE) + 3 (spaces) + 8 (VERSION) + 3 (spaces) + 16 (MODIFIED) + 2 (padding) = 47
-		nameWidth = m.state.Width - 47
+		nameWidth = m.state.Width - 47 - 2 // -2 for left padding
 		if nameWidth < 20 {
 			nameWidth = 20
 		}
 	} else {
 		// Fixed: 3 (spaces) + 12 (TYPE) + 3 (spaces) + 8 (VERSION) = 26
-		nameWidth = m.state.Width - 26
+		nameWidth = m.state.Width - 26 - 2 // -2 for left padding
 		if nameWidth < 20 {
 			nameWidth = 20
 		}
@@ -219,10 +219,10 @@ func (m Model) renderListItems(b *strings.Builder, start, end int, showModified 
 		if showModified {
 			name := truncateString(entry.Name, nameWidth-2) // -2 for padding
 			modifiedStr := entry.LastModifiedDate.Format("2006-01-02 15:04")
-			line = fmt.Sprintf("%-*s   %-12s   %8d   %16s  ", nameWidth, name, entry.Type, entry.Version, modifiedStr)
+			line = fmt.Sprintf("  %-*s   %-12s   %8d   %16s  ", nameWidth, name, entry.Type, entry.Version, modifiedStr)
 		} else {
 			name := truncateString(entry.Name, nameWidth-2) // -2 for padding
-			line = fmt.Sprintf("%-*s   %-12s   %8d", nameWidth, name, entry.Type, entry.Version)
+			line = fmt.Sprintf("  %-*s   %-12s   %8d", nameWidth, name, entry.Type, entry.Version)
 		}
 
 		if i == m.state.SelectedIndex {
@@ -244,13 +244,13 @@ func (m Model) renderTreeItems(b *strings.Builder, start, end int, showModified 
 	var nameWidth int
 	if showModified {
 		// Fixed: 3 (spaces) + 12 (TYPE) + 3 (spaces) + 8 (VERSION) + 3 (spaces) + 16 (MODIFIED) + 2 (padding) = 47
-		nameWidth = m.state.Width - 47
+		nameWidth = m.state.Width - 47 - 2 // -2 for left padding
 		if nameWidth < 20 {
 			nameWidth = 20
 		}
 	} else {
 		// Fixed: 3 (spaces) + 12 (TYPE) + 3 (spaces) + 8 (VERSION) = 26
-		nameWidth = m.state.Width - 26
+		nameWidth = m.state.Width - 26 - 2 // -2 for left padding
 		if nameWidth < 20 {
 			nameWidth = 20
 		}
@@ -284,7 +284,7 @@ func (m Model) renderTreeItems(b *strings.Builder, start, end int, showModified 
 			if dirNameWidth < 10 {
 				dirNameWidth = 10
 			}
-			line = fmt.Sprintf("%s%s%-*s", indent, prefix, dirNameWidth, dirName)
+			line = fmt.Sprintf("  %s%s%-*s", indent, prefix, dirNameWidth, dirName)
 		} else {
 			entry := node.Entry
 			// Account for indent when calculating available space
@@ -296,10 +296,10 @@ func (m Model) renderTreeItems(b *strings.Builder, start, end int, showModified 
 			if showModified {
 				name := truncateString(node.Name, availableWidth-2)
 				modifiedStr := entry.LastModifiedDate.Format("2006-01-02 15:04")
-				line = fmt.Sprintf("%s%s%-*s   %-12s   %8d   %16s  ", indent, prefix, availableWidth, name, entry.Type, entry.Version, modifiedStr)
+				line = fmt.Sprintf("  %s%s%-*s   %-12s   %8d   %16s  ", indent, prefix, availableWidth, name, entry.Type, entry.Version, modifiedStr)
 			} else {
 				name := truncateString(node.Name, availableWidth-2)
-				line = fmt.Sprintf("%s%s%-*s   %-12s   %8d", indent, prefix, availableWidth, name, entry.Type, entry.Version)
+				line = fmt.Sprintf("  %s%s%-*s   %-12s   %8d", indent, prefix, availableWidth, name, entry.Type, entry.Version)
 			}
 		}
 
@@ -327,16 +327,18 @@ func (m Model) renderDescribeView() string {
 	// Title (fixed at top)
 	title := titleStyle.Render(" DESCRIBE ")
 	output = append(output, title)
-	output = append(output, "")
 
 	// Parameter info box (fixed at top, full width)
 	box := m.renderDescribeBox(entry)
 	output = append(output, box)
-	output = append(output, "")
 
 	// Calculate panel dimensions
-	leftWidth := 35                             // Version history panel width
-	rightWidth := m.state.Width - leftWidth - 4 // Value panel width (minus spacing)
+	// Left panel: MarginLeft(2) + Width(35) = 37 total
+	// Right panel: Width(rightWidth) + MarginRight(2) = rightWidth + 2 total
+	// Total: 37 + rightWidth + 2 = m.state.Width
+	// So: rightWidth = m.state.Width - 39
+	leftWidth := 35                  // Version history panel width
+	rightWidth := m.state.Width - 43 // Account for left panel (37) and right margin (2)
 	if rightWidth < 40 {
 		rightWidth = 40
 	}
@@ -362,9 +364,9 @@ func (m Model) renderDescribeView() string {
 	// Status/Error message
 	var statusLine string
 	if m.state.ErrorMessage != "" {
-		statusLine = errorStyle.Render("✗ " + m.state.ErrorMessage)
+		statusLine = errorStyle.Render("  ✗ " + m.state.ErrorMessage)
 	} else if m.state.StatusMessage != "" {
-		statusLine = statusStyle.Render("✓ " + m.state.StatusMessage)
+		statusLine = errorStyle.Render("  ✓ " + m.state.StatusMessage)
 	} else {
 		statusLine = ""
 	}
@@ -372,7 +374,7 @@ func (m Model) renderDescribeView() string {
 
 	// Help
 	help := "x:mask  c:copy  e:edit  tab/⇧tab:version  l:latest  ↑↓:scroll  ←→:horiz  w:wrap  esc:back  q:quit"
-	output = append(output, helpStyle.Render(help))
+	output = append(output, helpStyle.Render("  "+help))
 
 	return strings.Join(output, "\n")
 }
@@ -431,6 +433,7 @@ func (m Model) renderVersionHistoryPanel(width, height int) string {
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(lipgloss.Color("62")).
 		Padding(0, 1).
+		MarginLeft(2).
 		Width(width).
 		Height(height)
 
@@ -569,6 +572,7 @@ func (m Model) renderValuePanel(width, height int) string {
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(lipgloss.Color("62")).
 		Padding(0, 1).
+		MarginRight(2).
 		Width(width).
 		Height(height)
 
@@ -601,12 +605,17 @@ func (m Model) renderDescribeBox(entry *cache.CacheEntry) string {
 	}
 
 	content := strings.Join(lines, "\n")
-	// Use full width minus a small margin
-	boxWidth := m.state.Width - 4
+	// Account for left and right margins
+	boxWidth := m.state.Width - 6 // Total rendered width = boxWidth + margins
 	if boxWidth < 60 {
 		boxWidth = 60
 	}
-	return borderStyle.Width(boxWidth).Render(content)
+	boxStyle := borderStyle.
+		Width(boxWidth).
+		Padding(0, 1).
+		MarginLeft(2).
+		MarginRight(2)
+	return boxStyle.Render(content)
 }
 
 // renderConfirmDialog renders the confirmation dialog overlay
