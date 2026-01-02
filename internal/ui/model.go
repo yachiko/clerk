@@ -1,0 +1,728 @@
+package ui
+
+import (
+	"context"
+	"fmt"
+	"strings"
+	"time"
+
+	"github.com/charmbracelet/bubbles/textinput"
+	tea "github.com/charmbracelet/bubbletea"
+	"github.com/yachiko/clerk/internal/aws"
+	"github.com/yachiko/clerk/internal/cache"
+	"github.com/yachiko/clerk/internal/config"
+	"github.com/yachiko/clerk/internal/util"
+)
+
+// Model is the main UI model
+type Model struct {
+	state     State
+	client    *aws.Client
+	cache     *cache.Manager
+	config    *config.Config
+	clipboard *util.ClipboardManager
+
+	searchInput textinput.Model
+	ready       bool
+	quitting    bool
+}
+
+// NewModel creates a new browse model
+func NewModel(client *aws.Client, cacheMgr *cache.Manager, cfg *config.Config) Model {
+	// Initialize search input
+	ti := textinput.New()
+	ti.Placeholder = "Search (glob patterns supported)..."
+	ti.CharLimit = 100
+
+	return Model{
+		state: State{
+			Mode:          ViewModeList,
+			ExpandedPaths: make(map[string]bool),
+		},
+		client:      client,
+		cache:       cacheMgr,
+		config:      cfg,
+		clipboard:   util.NewClipboardManager(cfg.ClipboardTimeout),
+		searchInput: ti,
+	}
+}
+
+// Init implements tea.Model
+func (m Model) Init() tea.Cmd {
+	return tea.Batch(
+		tea.EnterAltScreen,
+		m.loadEntries,
+	)
+}
+
+// loadEntries loads entries from cache
+func (m Model) loadEntries() tea.Msg {
+	entries := m.cache.GetAll()
+	return entriesLoadedMsg{entries: entries}
+}
+
+type entriesLoadedMsg struct {
+	entries []cache.CacheEntry
+}
+
+type statusMsg string
+type errorMsg string
+type clearStatusMsg struct{}
+type describeLoadedMsg struct {
+	value   string
+	history []HistoryEntry
+}
+
+type editCompleteMsg struct {
+	name     string
+	newValue string
+	version  int64
+	err      error
+}
+
+type deleteCompleteMsg struct {
+	name string
+	err  error
+}
+
+// Update implements tea.Model
+func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	var cmds []tea.Cmd
+
+	// Handle search input when active (before key processing)
+	if m.state.SearchActive {
+		if keyMsg, ok := msg.(tea.KeyMsg); ok {
+			// Special handling for search mode
+			switch keyMsg.String() {
+			case "esc":
+				m.state.SearchActive = false
+				m.searchInput.Blur()
+				return m, nil
+			case "enter":
+				m.state.SearchActive = false
+				m.searchInput.Blur()
+				return m, nil
+			case "down", "j":
+				// Exit search and navigate down
+				m.state.SearchActive = false
+				m.searchInput.Blur()
+				if m.state.SelectedIndex < len(m.state.FilteredItems)-1 {
+					m.state.SelectedIndex++
+					m.adjustScroll()
+				}
+				return m, nil
+			case "up", "k":
+				// Exit search and navigate up
+				m.state.SearchActive = false
+				m.searchInput.Blur()
+				if m.state.SelectedIndex > 0 {
+					m.state.SelectedIndex--
+					m.adjustScroll()
+				}
+				return m, nil
+			}
+			// Pass other keys to search input
+			var cmd tea.Cmd
+			m.searchInput, cmd = m.searchInput.Update(msg)
+			cmds = append(cmds, cmd)
+
+			// Update filter on input change
+			if m.state.SearchQuery != m.searchInput.Value() {
+				m.state.SearchQuery = m.searchInput.Value()
+				m.filterEntries()
+			}
+			return m, tea.Batch(cmds...)
+		}
+	}
+
+	switch msg := msg.(type) {
+	case tea.KeyMsg:
+		return m.handleKeyPress(msg)
+
+	case tea.WindowSizeMsg:
+		m.state.Width = msg.Width
+		m.state.Height = msg.Height
+		m.ready = true
+		return m, nil
+
+	case entriesLoadedMsg:
+		m.state.Entries = msg.entries
+		m.filterEntries()
+		return m, nil
+
+	case statusMsg:
+		m.state.StatusMessage = string(msg)
+		m.state.ErrorMessage = ""
+		return m, tea.Tick(3*time.Second, func(t time.Time) tea.Msg {
+			return clearStatusMsg{}
+		})
+
+	case errorMsg:
+		m.state.ErrorMessage = string(msg)
+		m.state.StatusMessage = ""
+		return m, tea.Tick(5*time.Second, func(t time.Time) tea.Msg {
+			return clearStatusMsg{}
+		})
+
+	case clearStatusMsg:
+		m.state.StatusMessage = ""
+		m.state.ErrorMessage = ""
+		return m, nil
+
+	case describeLoadedMsg:
+		m.state.DescribeValue = msg.value
+		m.state.DescribeHistory = msg.history
+		m.state.HistoryIndex = 0
+		return m, nil
+
+	case editCompleteMsg:
+		if msg.err != nil {
+			return m, func() tea.Msg { return errorMsg(msg.err.Error()) }
+		}
+
+		// Update cache
+		for i := range m.state.Entries {
+			if m.state.Entries[i].Name == msg.name {
+				m.state.Entries[i].Version = msg.version
+				m.state.Entries[i].LastModifiedDate = time.Now()
+				break
+			}
+		}
+		m.filterEntries()
+
+		// Update cache manager
+		if entry, ok := m.cache.Get(msg.name); ok {
+			entry.Version = msg.version
+			entry.LastModifiedDate = time.Now()
+			_ = m.cache.Update(*entry)
+		}
+
+		return m, func() tea.Msg {
+			return statusMsg(fmt.Sprintf("Updated %s to version %d", msg.name, msg.version))
+		}
+
+	case deleteCompleteMsg:
+		if msg.err != nil {
+			return m, func() tea.Msg { return errorMsg("Delete failed: " + msg.err.Error()) }
+		}
+
+		// Remove from local entries
+		for i := range m.state.Entries {
+			if m.state.Entries[i].Name == msg.name {
+				m.state.Entries = append(m.state.Entries[:i], m.state.Entries[i+1:]...)
+				break
+			}
+		}
+		m.filterEntries()
+
+		// Remove from cache
+		_ = m.cache.Delete(msg.name)
+
+		return m, func() tea.Msg {
+			return statusMsg(fmt.Sprintf("Deleted %s", msg.name))
+		}
+	}
+
+	return m, tea.Batch(cmds...)
+}
+
+// handleKeyPress handles keyboard input
+func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	// Handle confirmation dialog first
+	if m.state.Confirm.Active {
+		return m.handleConfirmKeys(msg)
+	}
+
+	// Global keys
+	switch msg.String() {
+	case "ctrl+c", "q":
+		if m.state.SearchActive {
+			m.state.SearchActive = false
+			m.searchInput.Blur()
+			return m, nil
+		}
+		if m.state.Mode == ViewModeDescribe {
+			m.state.Mode = ViewModeList
+			return m, nil
+		}
+		m.quitting = true
+		return m, tea.Quit
+	}
+
+	// Mode-specific handling
+	switch m.state.Mode {
+	case ViewModeList, ViewModeTree:
+		return m.handleBrowseKeys(msg)
+	case ViewModeDescribe:
+		return m.handleDescribeKeys(msg)
+	}
+
+	return m, nil
+}
+
+// handleBrowseKeys handles keys in browse view
+func (m Model) handleBrowseKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "/":
+		m.state.SearchActive = true
+		if m.config.SearchSlashPrefix {
+			m.searchInput.SetValue("/")
+		}
+		m.searchInput.Focus()
+		return m, textinput.Blink
+
+	case "up", "k":
+		if m.state.SelectedIndex > 0 {
+			m.state.SelectedIndex--
+			m.adjustScroll()
+		}
+		return m, nil
+
+	case "down", "j":
+		if m.state.SelectedIndex < len(m.state.FilteredItems)-1 {
+			m.state.SelectedIndex++
+			m.adjustScroll()
+		}
+		return m, nil
+
+	case "pgup", "left":
+		m.state.SelectedIndex -= m.visibleRows()
+		if m.state.SelectedIndex < 0 {
+			m.state.SelectedIndex = 0
+		}
+		m.adjustScroll()
+		return m, nil
+
+	case "pgdown", "right":
+		m.state.SelectedIndex += m.visibleRows()
+		if m.state.SelectedIndex >= len(m.state.FilteredItems) {
+			m.state.SelectedIndex = len(m.state.FilteredItems) - 1
+		}
+		if m.state.SelectedIndex < 0 {
+			m.state.SelectedIndex = 0
+		}
+		m.adjustScroll()
+		return m, nil
+
+	case "home":
+		m.state.SelectedIndex = 0
+		m.adjustScroll()
+		return m, nil
+
+	case "end":
+		m.state.SelectedIndex = len(m.state.FilteredItems) - 1
+		if m.state.SelectedIndex < 0 {
+			m.state.SelectedIndex = 0
+		}
+		m.adjustScroll()
+		return m, nil
+
+	case "t":
+		// Toggle tree/list view
+		if m.state.Mode == ViewModeList {
+			m.state.Mode = ViewModeTree
+			m.buildTree()
+		} else {
+			m.state.Mode = ViewModeList
+		}
+		return m, nil
+
+	case " ":
+		// Toggle expand/collapse in tree view
+		if m.state.Mode == ViewModeTree && len(m.state.TreeNodes) > 0 {
+			if m.state.SelectedIndex < len(m.state.TreeNodes) {
+				node := &m.state.TreeNodes[m.state.SelectedIndex]
+				if node.IsDir {
+					m.state.ExpandedPaths[node.Path] = !m.state.ExpandedPaths[node.Path]
+					m.buildTree()
+				}
+			}
+		}
+		return m, nil
+
+	case "d", "enter":
+		// Describe selected item
+		if len(m.state.FilteredItems) > 0 && m.state.SelectedIndex < len(m.state.FilteredItems) {
+			entry := m.state.FilteredItems[m.state.SelectedIndex]
+			// Trim whitespace from parameter name in case of encoding issues
+			paramName := strings.TrimSpace(entry.Name)
+			if paramName == "" {
+				return m, func() tea.Msg {
+					return errorMsg("Invalid parameter name")
+				}
+			}
+			m.state.DescribeEntry = &entry
+			m.state.Mode = ViewModeDescribe
+			m.state.DescribeMasked = true // Start masked
+			return m, m.loadDescribe(paramName)
+		}
+		return m, nil
+
+	case "c":
+		// Copy secret value
+		if len(m.state.FilteredItems) > 0 && m.state.SelectedIndex < len(m.state.FilteredItems) {
+			entry := m.state.FilteredItems[m.state.SelectedIndex]
+			return m, m.copySecret(entry.Name)
+		}
+		return m, nil
+
+	case "e":
+		// Edit
+		if len(m.state.FilteredItems) > 0 && m.state.SelectedIndex < len(m.state.FilteredItems) {
+			entry := m.state.FilteredItems[m.state.SelectedIndex]
+			return m, m.editSecret(entry.Name)
+		}
+		return m, nil
+
+	case "delete":
+		// Delete (requires confirmation)
+		if len(m.state.FilteredItems) > 0 && m.state.SelectedIndex < len(m.state.FilteredItems) {
+			entry := m.state.FilteredItems[m.state.SelectedIndex]
+			return m, m.initiateDelete(entry.Name)
+		}
+		return m, nil
+	}
+
+	return m, nil
+}
+
+// handleDescribeKeys handles keys in describe view
+func (m Model) handleDescribeKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc", "q":
+		m.state.Mode = ViewModeList
+		return m, nil
+
+	case "x":
+		// Toggle masked/unmasked
+		m.state.DescribeMasked = !m.state.DescribeMasked
+		return m, nil
+
+	case "c":
+		// Copy value
+		if m.state.DescribeValue != "" {
+			return m, m.copyValue(m.state.DescribeValue)
+		}
+		return m, nil
+
+	case "up", "k":
+		// Navigate to older version
+		if m.state.HistoryIndex < len(m.state.DescribeHistory)-1 {
+			m.state.HistoryIndex++
+			m.state.DescribeValue = m.state.DescribeHistory[m.state.HistoryIndex].Value
+		}
+		return m, nil
+
+	case "down", "j":
+		// Navigate to newer version
+		if m.state.HistoryIndex > 0 {
+			m.state.HistoryIndex--
+			m.state.DescribeValue = m.state.DescribeHistory[m.state.HistoryIndex].Value
+		}
+		return m, nil
+	}
+
+	return m, nil
+}
+
+// filterEntries filters entries based on search query
+func (m *Model) filterEntries() {
+	if m.state.SearchQuery == "" {
+		m.state.FilteredItems = m.state.Entries
+	} else {
+		var filtered []cache.CacheEntry
+		for _, e := range m.state.Entries {
+			if matchSearch(m.state.SearchQuery, e.Name) {
+				filtered = append(filtered, e)
+			}
+		}
+		m.state.FilteredItems = filtered
+	}
+
+	// Reset selection if out of bounds
+	if m.state.SelectedIndex >= len(m.state.FilteredItems) {
+		m.state.SelectedIndex = len(m.state.FilteredItems) - 1
+	}
+	if m.state.SelectedIndex < 0 {
+		m.state.SelectedIndex = 0
+	}
+}
+
+// matchSearch checks if name matches search query
+func matchSearch(query, name string) bool {
+	query = strings.ToLower(query)
+	name = strings.ToLower(name)
+
+	// Handle glob patterns
+	if strings.HasSuffix(query, "/*") {
+		prefix := strings.TrimSuffix(query, "/*")
+		return strings.HasPrefix(name, prefix+"/") || name == prefix
+	}
+	if strings.HasSuffix(query, "*") {
+		prefix := strings.TrimSuffix(query, "*")
+		return strings.HasPrefix(name, prefix)
+	}
+	if strings.HasPrefix(query, "*") {
+		suffix := strings.TrimPrefix(query, "*")
+		return strings.HasSuffix(name, suffix)
+	}
+
+	// Simple contains
+	return strings.Contains(name, query)
+}
+
+// adjustScroll adjusts scroll offset to keep selection visible
+func (m *Model) adjustScroll() {
+	visible := m.visibleRows()
+	if m.state.SelectedIndex < m.state.ScrollOffset {
+		m.state.ScrollOffset = m.state.SelectedIndex
+	}
+	if m.state.SelectedIndex >= m.state.ScrollOffset+visible {
+		m.state.ScrollOffset = m.state.SelectedIndex - visible + 1
+	}
+}
+
+// visibleRows returns number of visible rows
+func (m *Model) visibleRows() int {
+	// Subtract: title(1) + search(1) + header(1) + separator(1) + footer(1) + status(1) + help(1) = 7 lines
+	rows := m.state.Height - 7
+	if rows < 5 {
+		rows = 5
+	}
+	return rows
+}
+
+// buildTree builds tree structure from entries
+func (m *Model) buildTree() {
+	m.state.TreeNodes = buildTreeNodes(m.state.FilteredItems, m.state.ExpandedPaths)
+}
+
+// loadDescribe loads describe data for a parameter
+func (m Model) loadDescribe(name string) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		// Validate parameter name
+		if name == "" {
+			return errorMsg("Invalid parameter name")
+		}
+
+		// Get current value
+		param, err := m.client.GetParameter(ctx, name, true)
+		if err != nil {
+			// More informative error message
+			msg := "Failed to load parameter"
+			if err != nil {
+				msg += ": " + err.Error()
+			}
+			return errorMsg(msg)
+		}
+
+		// Get history
+		history, err := m.client.GetParameterHistory(ctx, name, 3, true)
+		if err != nil {
+			// Continue without history
+			return describeLoadedMsg{
+				value:   param.Value,
+				history: []HistoryEntry{{Version: param.Version, Value: param.Value, Modified: param.LastModifiedDate.Format(time.RFC3339)}},
+			}
+		}
+
+		var historyEntries []HistoryEntry
+		for _, h := range history {
+			historyEntries = append(historyEntries, HistoryEntry{
+				Version:  h.Version,
+				Value:    h.Value,
+				Modified: h.LastModifiedDate.Format(time.RFC3339),
+			})
+		}
+
+		return describeLoadedMsg{
+			value:   param.Value,
+			history: historyEntries,
+		}
+	}
+}
+
+// copySecret copies secret value to clipboard
+func (m Model) copySecret(name string) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		param, err := m.client.GetParameter(ctx, name, true)
+		if err != nil {
+			return errorMsg("Failed to get secret: " + err.Error())
+		}
+
+		msg, err := m.clipboard.CopyWithMessage(param.Value)
+		if err != nil {
+			return errorMsg("Failed to copy: " + err.Error())
+		}
+
+		return statusMsg(msg)
+	}
+}
+
+// copyValue copies a value to clipboard
+func (m Model) copyValue(value string) tea.Cmd {
+	return func() tea.Msg {
+		msg, err := m.clipboard.CopyWithMessage(value)
+		if err != nil {
+			return errorMsg("Failed to copy: " + err.Error())
+		}
+		return statusMsg(msg)
+	}
+}
+
+// editSecret opens an editor to edit the parameter
+func (m Model) editSecret(name string) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer cancel()
+
+		// Get current value
+		param, err := m.client.GetParameter(ctx, name, true)
+		if err != nil {
+			return editCompleteMsg{err: fmt.Errorf("failed to get parameter: %w", err)}
+		}
+
+		// Determine file extension based on content
+		ext := ".txt"
+		trimmedVal := strings.TrimSpace(param.Value)
+		if strings.HasPrefix(trimmedVal, "{") {
+			ext = ".json"
+		} else if strings.HasPrefix(trimmedVal, "<") {
+			ext = ".xml"
+		}
+
+		// Open in editor
+		editor := util.NewEditor(util.EditorConfig{})
+		newValue, err := editor.Edit(param.Value, ext)
+		if err != nil {
+			return editCompleteMsg{err: fmt.Errorf("editor error: %w", err)}
+		}
+
+		// Check if value changed
+		newValue = strings.TrimSpace(newValue)
+		if newValue == param.Value {
+			return statusMsg("No changes made")
+		}
+
+		// Update parameter
+		input := &aws.PutParameterInput{
+			Name:      name,
+			Value:     newValue,
+			Type:      param.Type,
+			Overwrite: true,
+		}
+
+		output, err := m.client.PutParameter(ctx, input)
+		if err != nil {
+			return editCompleteMsg{err: fmt.Errorf("failed to update: %w", err)}
+		}
+
+		return editCompleteMsg{
+			name:     name,
+			newValue: newValue,
+			version:  output.Version,
+		}
+	}
+}
+
+// initiateDelete starts the delete confirmation flow
+func (m *Model) initiateDelete(name string) tea.Cmd {
+	// Get confirmation word (last path segment, max 10 chars)
+	parts := strings.Split(name, "/")
+	confirmText := parts[len(parts)-1]
+	if len(confirmText) > 10 {
+		confirmText = confirmText[:10]
+	}
+
+	m.state.Confirm = ConfirmState{
+		Active:      true,
+		Action:      "delete",
+		Target:      name,
+		ConfirmText: confirmText,
+	}
+
+	return nil
+}
+
+// deleteSecret performs the actual deletion
+func (m Model) deleteSecret(name string) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+
+		err := m.client.DeleteParameter(ctx, name)
+		if err != nil {
+			return deleteCompleteMsg{name: name, err: err}
+		}
+
+		return deleteCompleteMsg{name: name}
+	}
+}
+
+// handleConfirmKeys handles keyboard input during confirmation
+func (m Model) handleConfirmKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc":
+		m.state.Confirm = ConfirmState{}
+		return m, nil
+
+	case "enter":
+		if m.state.Confirm.Input == m.state.Confirm.ConfirmText {
+			// Confirmed - execute delete
+			name := m.state.Confirm.Target
+			m.state.Confirm = ConfirmState{}
+			return m, m.deleteSecret(name)
+		}
+		m.state.Confirm.ErrorMsg = "Incorrect confirmation text"
+		return m, nil
+
+	case "backspace":
+		if len(m.state.Confirm.Input) > 0 {
+			m.state.Confirm.Input = m.state.Confirm.Input[:len(m.state.Confirm.Input)-1]
+			m.state.Confirm.ErrorMsg = ""
+		}
+		return m, nil
+
+	default:
+		// Add character to input
+		if len(msg.String()) == 1 {
+			m.state.Confirm.Input += msg.String()
+			m.state.Confirm.ErrorMsg = ""
+		}
+		return m, nil
+	}
+}
+
+// View implements tea.Model
+func (m Model) View() string {
+	if !m.ready {
+		return "Loading..."
+	}
+
+	if m.quitting {
+		return ""
+	}
+
+	var view string
+	switch m.state.Mode {
+	case ViewModeDescribe:
+		view = m.renderDescribeView()
+	default:
+		view = m.renderBrowseView()
+	}
+
+	// Overlay confirm dialog if active
+	if m.state.Confirm.Active {
+		dialog := m.renderConfirmDialog()
+		// Center the dialog
+		view = centerDialog(dialog, m.state.Width, m.state.Height)
+	}
+
+	return view
+}
