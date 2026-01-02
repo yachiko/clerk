@@ -223,22 +223,27 @@ type RefreshProgressCallback func(current, total int)
 
 // Refresh updates the entire cache from AWS
 func (m *Manager) Refresh(ctx context.Context, client *aws.Client, region string, parallel int, progressCb RefreshProgressCallback) error {
-	params, err := client.DescribeAllParameters(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to fetch parameters: %w", err)
-	}
+	// Stream parameters as they're discovered
+	paramsCh := make(chan aws.ParameterMetadata, 100)
+	var streamErr error
+	var streamWg sync.WaitGroup
 
-	total := len(params)
-	entries := make([]CacheEntry, total)
+	streamWg.Add(1)
+	go func() {
+		defer streamWg.Done()
+		streamErr = client.DescribeParametersStream(ctx, paramsCh)
+	}()
 
-	sem := make(chan struct{}, parallel)
-	var wg sync.WaitGroup
+	// Process parameters as they arrive
+	var entries []CacheEntry
 	var mu sync.Mutex
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, parallel)
 	completed := 0
 
-	for i, p := range params {
+	for param := range paramsCh {
 		wg.Add(1)
-		go func(idx int, param aws.ParameterMetadata) {
+		go func(p aws.ParameterMetadata) {
 			defer wg.Done()
 
 			sem <- struct{}{}
@@ -249,28 +254,33 @@ func (m *Manager) Refresh(ctx context.Context, client *aws.Client, region string
 			}
 
 			entry := CacheEntry{
-				Name:             param.Name,
-				Type:             param.Type,
-				Version:          param.Version,
-				LastModifiedDate: param.LastModifiedDate,
+				Name:             p.Name,
+				Type:             p.Type,
+				Version:          p.Version,
+				LastModifiedDate: p.LastModifiedDate,
 			}
 
-			tags, err := client.GetParameterTags(ctx, param.Name)
+			tags, err := client.GetParameterTags(ctx, p.Name)
 			if err == nil {
 				entry.Tags = tags
 			}
 
 			mu.Lock()
-			entries[idx] = entry
+			entries = append(entries, entry)
 			completed++
 			if progressCb != nil {
-				progressCb(completed, total)
+				progressCb(completed, 0) // total unknown during streaming
 			}
 			mu.Unlock()
-		}(i, p)
+		}(param)
 	}
 
 	wg.Wait()
+	streamWg.Wait()
+
+	if streamErr != nil {
+		return streamErr
+	}
 
 	if ctx.Err() != nil {
 		return ctx.Err()

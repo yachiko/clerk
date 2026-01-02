@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/fatih/color"
-	"github.com/schollz/progressbar/v3"
 	"github.com/spf13/cobra"
 	"github.com/yachiko/clerk/internal/aws"
 	"github.com/yachiko/clerk/internal/cache"
@@ -88,42 +87,13 @@ func runRefresh(cmd *cobra.Command, args []string) error {
 
 	startTime := time.Now()
 
-	// Create progress bar (for plain output)
-	var bar *progressbar.ProgressBar
+	// Create progress callback (for plain output)
 	var progressCb cache.RefreshProgressCallback
 
 	if globalOpts.Output != "json" {
-		// First, count total parameters
-		color.Cyan("Counting parameters...")
-		params, err := client.DescribeAllParameters(ctx)
-		if err != nil {
-			return fmt.Errorf("failed to count parameters: %w", err)
-		}
-		total := len(params)
-
-		if total == 0 {
-			color.Yellow("No parameters found in AWS Parameter Store")
-			return nil
-		}
-
-		bar = progressbar.NewOptions(total,
-			progressbar.OptionSetDescription("Fetching metadata"),
-			progressbar.OptionSetWidth(40),
-			progressbar.OptionShowCount(),
-			progressbar.OptionShowIts(),
-			progressbar.OptionSetItsString("params"),
-			progressbar.OptionSetTheme(progressbar.Theme{
-				Saucer:        "=",
-				SaucerHead:    ">",
-				SaucerPadding: " ",
-				BarStart:      "[",
-				BarEnd:        "]",
-			}),
-			progressbar.OptionClearOnFinish(),
-		)
-
+		color.Cyan("Loading parameters...")
 		progressCb = func(current, total int) {
-			bar.Set(current)
+			fmt.Printf("\rLoaded: %d", current)
 		}
 	}
 
@@ -138,8 +108,8 @@ func runRefresh(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to refresh cache: %w", err)
 	}
 
-	if bar != nil {
-		bar.Finish()
+	if globalOpts.Output != "json" {
+		fmt.Println() // New line after progress
 	}
 
 	duration := time.Since(startTime)

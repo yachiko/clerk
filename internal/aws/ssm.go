@@ -295,6 +295,40 @@ func (c *Client) DescribeAllParameters(ctx context.Context) ([]ParameterMetadata
 	return params, nil
 }
 
+// DescribeParametersStream sends parameters to a channel as they're discovered
+func (c *Client) DescribeParametersStream(ctx context.Context, ch chan<- ParameterMetadata) error {
+	defer close(ch)
+
+	input := &ssm.DescribeParametersInput{}
+	paginator := ssm.NewDescribeParametersPaginator(c.ssm, input)
+
+	for paginator.HasMorePages() {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+
+		output, err := paginator.NextPage(ctx)
+		if err != nil {
+			return fmt.Errorf("failed to describe parameters: %w", err)
+		}
+
+		for _, p := range output.Parameters {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case ch <- ParameterMetadata{
+				Name:             aws.ToString(p.Name),
+				Type:             string(p.Type),
+				Version:          p.Version,
+				LastModifiedDate: aws.ToTime(p.LastModifiedDate),
+			}:
+			}
+		}
+	}
+
+	return nil
+}
+
 // matchGlob performs simple glob pattern matching
 func matchGlob(pattern, name string) bool {
 	if pattern == "*" || pattern == "/*" {
