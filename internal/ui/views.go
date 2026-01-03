@@ -375,7 +375,7 @@ func (m Model) renderDescribeView() string {
 	if m.state.ErrorMessage != "" {
 		statusLine = errorStyle.Render("  ✗ " + m.state.ErrorMessage)
 	} else if m.state.StatusMessage != "" {
-		statusLine = errorStyle.Render("  ✓ " + m.state.StatusMessage)
+		statusLine = statusStyle.Render("  ✓ " + m.state.StatusMessage)
 	} else {
 		statusLine = ""
 	}
