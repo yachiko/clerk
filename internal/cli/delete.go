@@ -138,7 +138,7 @@ func confirmDeletion(name string, param *aws.Parameter) (bool, error) {
 	fmt.Printf("  Modified: %s\n\n", param.LastModifiedDate.Format(time.RFC3339))
 	color.Red("This action cannot be undone!\n\n")
 
-	confirmWord := getConfirmationWord(name)
+	confirmWord := "delete me"
 	fmt.Printf("Type '%s' to confirm deletion: ", confirmWord)
 
 	reader := bufio.NewReader(os.Stdin)

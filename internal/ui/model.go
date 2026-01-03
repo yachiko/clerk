@@ -1142,18 +1142,11 @@ func (m Model) editSecret(name string) tea.Cmd {
 
 // initiateDelete starts the delete confirmation flow
 func (m *Model) initiateDelete(name string) tea.Cmd {
-	// Get confirmation word (last path segment, max 10 chars)
-	parts := strings.Split(name, "/")
-	confirmText := parts[len(parts)-1]
-	if len(confirmText) > 10 {
-		confirmText = confirmText[:10]
-	}
-
 	m.state.Confirm = ConfirmState{
 		Active:      true,
 		Action:      "delete",
 		Target:      name,
-		ConfirmText: confirmText,
+		ConfirmText: "delete me",
 	}
 
 	return nil
