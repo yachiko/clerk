@@ -638,7 +638,7 @@ func (m Model) renderConfirmDialog() string {
 		b.WriteString(fmt.Sprintf("You are about to delete:\n%s\n\n", m.state.Confirm.Target))
 		b.WriteString(warningStyle.Render("This action cannot be undone!"))
 		b.WriteString("\n\n")
-		b.WriteString(promptStyle.Render(fmt.Sprintf("Type '%s' to confirm: ", m.state.Confirm.ConfirmText)))
+		b.WriteString(promptStyle.Render("Type 'delete me' to confirm: "))
 		b.WriteString(inputStyle.Render(m.state.Confirm.Input))
 	} else if action == "move" {
 		b.WriteString(warningStyle.Render("MOVE/RENAME PARAMETER"))
