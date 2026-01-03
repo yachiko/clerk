@@ -33,8 +33,11 @@ type State struct {
 	ScrollOffset  int
 
 	// Search
-	SearchQuery  string
-	SearchActive bool
+	SearchQuery            string
+	SearchActive           bool
+	CurrentSuggestion      string   // Current suggested completion
+	SuggestionAlternatives []string // All alternatives for current position
+	SuggestionIndex        int      // Index in alternatives (-1 = none)
 
 	// Sorting
 	SortType SortType

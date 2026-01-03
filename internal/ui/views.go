@@ -98,7 +98,16 @@ func (m Model) renderBrowseView() string {
 
 	// Search bar (always visible, fixed at top)
 	if m.state.SearchActive {
-		lines = append(lines, "  "+searchStyle.Render("🔍 ")+m.searchInput.View())
+		searchLine := "  " + searchStyle.Render("🔍 ") + m.searchInput.View()
+
+		// Show suggestion as ghost text
+		if m.state.CurrentSuggestion != "" && m.state.CurrentSuggestion != m.state.SearchQuery {
+			// Show the part that would be completed in dim style
+			ghostText := m.state.CurrentSuggestion[len(m.state.SearchQuery):]
+			searchLine += dimStyle.Render(ghostText)
+		}
+
+		lines = append(lines, searchLine)
 	} else if m.state.SearchQuery != "" {
 		lines = append(lines, dimStyle.Render("  Filter: "+m.state.SearchQuery+" (/ to edit)"))
 	} else {
