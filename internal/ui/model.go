@@ -115,14 +115,39 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			switch keyMsg.String() {
 			case "esc":
 				m.state.SearchActive = false
+				m.state.CurrentSuggestion = ""
+				m.state.SuggestionAlternatives = nil
+				m.state.SuggestionIndex = -1
 				m.searchInput.Blur()
 				return m, nil
 			case "enter":
 				m.state.SearchActive = false
+				m.state.CurrentSuggestion = ""
+				m.state.SuggestionAlternatives = nil
+				m.state.SuggestionIndex = -1
 				m.searchInput.Blur()
 				return m, nil
-			case "down", "j":
-				// Exit search and navigate down
+			case "tab", "right":
+				// Accept current suggestion
+				if m.state.CurrentSuggestion != "" {
+					m.searchInput.SetValue(m.state.CurrentSuggestion)
+					m.searchInput.CursorEnd()
+					m.state.SearchQuery = m.state.CurrentSuggestion
+					m.updatePathSuggestions()
+					m.filterEntries()
+				}
+				return m, nil
+			case "down":
+				// Cycle to next alternative
+				if len(m.state.SuggestionAlternatives) > 0 {
+					m.state.SuggestionIndex++
+					if m.state.SuggestionIndex >= len(m.state.SuggestionAlternatives) {
+						m.state.SuggestionIndex = 0
+					}
+					m.state.CurrentSuggestion = m.state.SuggestionAlternatives[m.state.SuggestionIndex]
+					return m, nil
+				}
+				// No suggestions, exit search and navigate down
 				m.state.SearchActive = false
 				m.searchInput.Blur()
 				if m.state.SelectedIndex < len(m.state.FilteredItems)-1 {
@@ -130,8 +155,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.adjustScroll()
 				}
 				return m, nil
-			case "up", "k":
-				// Exit search and navigate up
+			case "up":
+				// Cycle to previous alternative
+				if len(m.state.SuggestionAlternatives) > 0 {
+					m.state.SuggestionIndex--
+					if m.state.SuggestionIndex < 0 {
+						m.state.SuggestionIndex = len(m.state.SuggestionAlternatives) - 1
+					}
+					m.state.CurrentSuggestion = m.state.SuggestionAlternatives[m.state.SuggestionIndex]
+					return m, nil
+				}
+				// No suggestions, exit search and navigate up
 				m.state.SearchActive = false
 				m.searchInput.Blur()
 				if m.state.SelectedIndex > 0 {
@@ -145,9 +179,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.searchInput, cmd = m.searchInput.Update(msg)
 			cmds = append(cmds, cmd)
 
-			// Update filter on input change
+			// Update filter and suggestions on input change
 			if m.state.SearchQuery != m.searchInput.Value() {
 				m.state.SearchQuery = m.searchInput.Value()
+				m.updatePathSuggestions()
 				m.filterEntries()
 			}
 			return m, tea.Batch(cmds...)
@@ -377,8 +412,13 @@ func (m Model) handleBrowseKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "/":
 		m.state.SearchActive = true
+		m.state.CurrentSuggestion = ""
+		m.state.SuggestionAlternatives = nil
+		m.state.SuggestionIndex = -1
 		if m.config.SearchSlashPrefix {
 			m.searchInput.SetValue("/")
+			m.state.SearchQuery = "/"
+			m.updatePathSuggestions()
 		}
 		m.searchInput.Focus()
 		return m, textinput.Blink
@@ -479,6 +519,12 @@ func (m Model) handleBrowseKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				}
 			}
 			m.state.DescribeEntry = entry
+			m.state.DescribeValue = "" // Clear previous value to show "Loading..."
+			m.state.DescribeHistory = nil
+			m.state.HistoryIndex = 0
+			m.state.HistoryScrollOffset = 0
+			m.state.ValueScrollOffset = 0
+			m.state.ValueHorizontalScroll = 0
 			m.state.PreviousMode = m.state.Mode // Store current mode to restore later
 			m.state.Mode = ViewModeDescribe
 			// Use config to determine if value should be masked by default
@@ -726,6 +772,87 @@ func (m Model) updateSelectedVersion() (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// updatePathSuggestions updates path-based suggestions for autocomplete
+func (m *Model) updatePathSuggestions() {
+	query := m.state.SearchQuery
+
+	// Clear suggestions if query is empty
+	if query == "" {
+		m.state.CurrentSuggestion = ""
+		m.state.SuggestionAlternatives = nil
+		m.state.SuggestionIndex = -1
+		return
+	}
+
+	// Find all unique path segments that start with the query
+	segmentMap := make(map[string]bool)
+
+	for _, e := range m.state.Entries {
+		// Check if this entry starts with the query
+		if strings.HasPrefix(e.Name, query) {
+			// Find the next segment after the query
+			remaining := e.Name[len(query):]
+
+			// If query ends with /, find next segment
+			// If query doesn't end with /, complete current segment up to next /
+			var nextSegment string
+			if strings.HasSuffix(query, "/") {
+				// Find next slash
+				slashIdx := strings.Index(remaining, "/")
+				if slashIdx > 0 {
+					nextSegment = query + remaining[:slashIdx+1]
+				} else if remaining != "" {
+					// No more slashes, this is the final segment
+					nextSegment = e.Name
+				}
+			} else {
+				// Complete current segment
+				slashIdx := strings.Index(remaining, "/")
+				if slashIdx >= 0 {
+					nextSegment = query + remaining[:slashIdx+1]
+				} else {
+					// No slash found, suggest the full name
+					nextSegment = e.Name
+				}
+			}
+
+			if nextSegment != "" && nextSegment != query {
+				segmentMap[nextSegment] = true
+			}
+		}
+	}
+
+	// Convert map to sorted slice
+	var alternatives []string
+	for segment := range segmentMap {
+		alternatives = append(alternatives, segment)
+	}
+
+	// Sort alternatives alphabetically
+	if len(alternatives) > 1 {
+		for i := 0; i < len(alternatives)-1; i++ {
+			for j := i + 1; j < len(alternatives); j++ {
+				if alternatives[j] < alternatives[i] {
+					alternatives[i], alternatives[j] = alternatives[j], alternatives[i]
+				}
+			}
+		}
+	}
+
+	m.state.SuggestionAlternatives = alternatives
+
+	if len(alternatives) > 0 {
+		// Set to first alternative or maintain current index if valid
+		if m.state.SuggestionIndex < 0 || m.state.SuggestionIndex >= len(alternatives) {
+			m.state.SuggestionIndex = 0
+		}
+		m.state.CurrentSuggestion = alternatives[m.state.SuggestionIndex]
+	} else {
+		m.state.CurrentSuggestion = ""
+		m.state.SuggestionIndex = -1
+	}
+}
+
 // filterEntries filters and sorts entries based on search query and sort order
 func (m *Model) filterEntries() {
 	if m.state.SearchQuery == "" {
@@ -738,6 +865,7 @@ func (m *Model) filterEntries() {
 			}
 		}
 		m.state.FilteredItems = filtered
+		m.state.ScrollOffset = 0 // Reset scroll to top when filtering
 	}
 
 	// Apply sorting
