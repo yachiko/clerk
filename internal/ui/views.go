@@ -46,7 +46,7 @@ var (
 
 	borderStyle = lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
-			BorderForeground(lipgloss.Color("62"))
+			BorderForeground(lipgloss.Color("252"))
 
 	labelStyle = lipgloss.NewStyle().
 			Bold(true).
@@ -455,7 +455,7 @@ func (m Model) renderVersionHistoryPanel(width, height int) string {
 
 	panelStyle := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
-		BorderForeground(lipgloss.Color("62")).
+		BorderForeground(lipgloss.Color("252")).
 		Padding(0, 1).
 		MarginLeft(2).
 		Width(width).
@@ -594,7 +594,7 @@ func (m Model) renderValuePanel(width, height int) string {
 
 	panelStyle := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
-		BorderForeground(lipgloss.Color("62")).
+		BorderForeground(lipgloss.Color("252")).
 		Padding(0, 1).
 		MarginRight(2).
 		Width(width).
