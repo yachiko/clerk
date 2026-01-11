@@ -6,26 +6,28 @@ This directory contains detailed task files for implementing the Clerk CLI tool.
 
 ## Task Summary
 
-| Task | Name | Description | Estimated Effort |
-|------|------|-------------|------------------|
-| 01 | [Project Setup](01-project-setup.md) | Initialize Go module, dependencies, directory structure | 1-2 hours |
-| 02 | [Config Module](02-config-module.md) | Configuration management system | 2-3 hours |
-| 03 | [AWS SSM Client](03-aws-ssm-client.md) | AWS Parameter Store client wrapper | 3-4 hours |
-| 04 | [Cache Module](04-cache-module.md) | Local caching for parameter metadata | 3-4 hours |
-| 05 | [Utility Modules](05-utility-modules.md) | Clipboard, editor, output formatting, signals | 2-3 hours |
-| 06 | [PUT Command](06-put-command.md) | Create/update secrets | 2-3 hours |
-| 07 | [GET Command](07-get-command.md) | Retrieve secrets | 2 hours |
-| 08 | [DELETE Command](08-delete-command.md) | Delete secrets with confirmation | 2 hours |
-| 09 | [LIST Command](09-list-command.md) | List secrets with filtering | 2-3 hours |
-| 10 | [CP/MV Commands](10-copy-move-commands.md) | Copy and move secrets | 2-3 hours |
-| 11 | [REFRESH Command](11-refresh-command.md) | Manual cache refresh | 2 hours |
-| 12 | [Browse UI Core](12-browse-ui-core.md) | Interactive TUI framework | 4-5 hours |
-| 13 | [Browse UI Views](13-browse-ui-views.md) | View rendering and styling | 3-4 hours |
-| 14 | [Browse UI Actions](14-browse-ui-actions.md) | Edit and delete in browse mode | 3-4 hours |
-| 15 | [Shell Completion](15-shell-completion.md) | Bash, zsh, fish completions | 2 hours |
-| 16 | [Build & Distribution](16-build-distribution.md) | Makefile, README, release process | 2 hours |
+| Task | Name                                             | Description                                             | Estimated Effort |
+| ---- | ------------------------------------------------ | ------------------------------------------------------- | ---------------- |
+| 01   | [Project Setup](01-project-setup.md)             | Initialize Go module, dependencies, directory structure | 1-2 hours        |
+| 02   | [Config Module](02-config-module.md)             | Configuration management system                         | 2-3 hours        |
+| 03   | [AWS SSM Client](03-aws-ssm-client.md)           | AWS Parameter Store client wrapper                      | 3-4 hours        |
+| 04   | [Cache Module](04-cache-module.md)               | Local caching for parameter metadata                    | 3-4 hours        |
+| 05   | [Utility Modules](05-utility-modules.md)         | Clipboard, editor, output formatting, signals           | 2-3 hours        |
+| 06   | [PUT Command](06-put-command.md)                 | Create/update secrets                                   | 2-3 hours        |
+| 07   | [GET Command](07-get-command.md)                 | Retrieve secrets                                        | 2 hours          |
+| 08   | [DELETE Command](08-delete-command.md)           | Delete secrets with confirmation                        | 2 hours          |
+| 09   | [LIST Command](09-list-command.md)               | List secrets with filtering                             | 2-3 hours        |
+| 10   | [CP/MV Commands](10-copy-move-commands.md)       | Copy and move secrets                                   | 2-3 hours        |
+| 11   | [REFRESH Command](11-refresh-command.md)         | Manual cache refresh                                    | 2 hours          |
+| 12   | [Browse UI Core](12-browse-ui-core.md)           | Interactive TUI framework                               | 4-5 hours        |
+| 13   | [Browse UI Views](13-browse-ui-views.md)         | View rendering and styling                              | 3-4 hours        |
+| 14   | [Browse UI Actions](14-browse-ui-actions.md)     | Edit and delete in browse mode                          | 3-4 hours        |
+| 15   | [Shell Completion](15-shell-completion.md)       | Bash, zsh, fish completions                             | 2 hours          |
+| 16   | [Build & Distribution](16-build-distribution.md) | Makefile, README, release process                       | 2 hours          |
+| 17   | [Unit Tests](17-unit-tests.md)                   | Comprehensive unit tests across all modules             | 4-5 hours        |
+| 18   | [Integration Tests](18-integration-tests.md)     | Integration tests with moto server, fixtures            | 4-5 hours        |
 
-**Total Estimated Effort: 35-45 hours**
+**Total Estimated Effort: 43-55 hours**
 
 ## Dependency Graph
 
@@ -46,6 +48,8 @@ This directory contains detailed task files for implementing the Clerk CLI tool.
 │   │       │   └── 14-browse-ui-actions
 │   │       └── 15-shell-completion
 │   └── 16-build-distribution
+│       ├── 17-unit-tests
+│       └── 18-integration-tests
 ```
 
 ## Implementation Notes for Claude Haiku 4.5
@@ -73,6 +77,8 @@ Each task file includes:
 2. For command tasks (06-11), test with actual AWS credentials
 3. For UI tasks (12-14), run `clerk browse` and verify interactions
 4. Run `make test` periodically to catch regressions
+5. Run `make test-unit` for unit tests (Task 17)
+6. Run `make test-integration` for integration tests with moto (Task 18)
 
 ## Quick Start
 
@@ -99,6 +105,7 @@ github.com/fatih/color           # Colored output
 github.com/aws/aws-sdk-go-v2     # AWS SDK
 github.com/schollz/progressbar/v3 # Progress bars
 github.com/atotto/clipboard      # Clipboard access
+github.com/stretchr/testify      # Testing assertions
 ```
 
 ## File Structure (Final)
@@ -112,13 +119,20 @@ clerk/
 │   ├── aws/
 │   │   ├── ssm.go
 │   │   ├── types.go
-│   │   └── errors.go
+│   │   ├── errors.go
+│   │   ├── ssm_test.go
+│   │   ├── types_test.go
+│   │   └── errors_test.go
 │   ├── cache/
 │   │   ├── cache.go
-│   │   └── types.go
+│   │   ├── types.go
+│   │   ├── cache_test.go
+│   │   └── types_test.go
 │   ├── cli/
 │   │   ├── root.go
 │   │   ├── exitcodes.go
+│   │   ├── exitcodes_test.go
+│   │   ├── commands_test.go
 │   │   ├── put.go
 │   │   ├── get.go
 │   │   ├── delete.go
@@ -132,7 +146,17 @@ clerk/
 │   │   └── completion_helpers.go
 │   ├── config/
 │   │   ├── config.go
-│   │   └── types.go
+│   │   ├── types.go
+│   │   ├── config_test.go
+│   │   └── types_test.go
+│   ├── integration/
+│   │   ├── ssm_test.go
+│   │   ├── scale_test.go
+│   │   └── benchmark_test.go
+│   ├── testutil/
+│   │   ├── helpers.go
+│   │   ├── fixtures.go
+│   │   └── integration.go
 │   ├── ui/
 │   │   ├── model.go
 │   │   ├── types.go
@@ -141,9 +165,17 @@ clerk/
 │   │   └── confirm.go
 │   └── util/
 │       ├── clipboard.go
+│       ├── clipboard_test.go
 │       ├── editor.go
+│       ├── editor_test.go
 │       ├── output.go
-│       └── signal.go
+│       ├── output_test.go
+│       ├── signal.go
+│       └── signal_test.go
+├── scripts/
+│   ├── install-moto.sh
+│   ├── run-integration-tests.sh
+│   └── generate-fixtures.sh
 ├── tasks/
 │   └── (task files)
 ├── go.mod
@@ -151,5 +183,6 @@ clerk/
 ├── Makefile
 ├── README.md
 ├── .gitignore
-└── .goreleaser.yaml
+├── .goreleaser.yaml
+└── docker-compose.test.yml
 ```
