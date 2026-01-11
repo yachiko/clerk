@@ -350,9 +350,15 @@ func (m Model) renderDescribeView() string {
 	title := titleStyle.Render(" DESCRIBE ")
 	output = append(output, title)
 
-	// Parameter info box (fixed at top, full width)
+	// Empty line (equivalent to search bar in browse view for layout consistency)
+	output = append(output, "")
+
+	// Parameter info box (equivalent to header in browse view)
 	box := m.renderDescribeBox(entry)
 	output = append(output, box)
+
+	// Separator line (matching browse view structure)
+	output = append(output, "  "+strings.Repeat("─", m.state.Width-4))
 
 	// Calculate panel dimensions
 	// Left panel: MarginLeft(2) + Width(35) = 37 total
@@ -366,7 +372,8 @@ func (m Model) renderDescribeView() string {
 	}
 
 	// Calculate available height for panels
-	// Title(1) + empty(1) + box(~7) + empty(1) + panels + empty(1) + status(1) + help(1) = Height
+	// Title(1) + empty(1) + box(~7) + separator(1) + panels + separator(1) + status(1) + help(1) = Height
+	// Approximate box height: 5-7 lines
 	panelHeight := m.state.Height - 13
 	if panelHeight < 10 {
 		panelHeight = 10
@@ -381,7 +388,9 @@ func (m Model) renderDescribeView() string {
 	// Join panels horizontally
 	panels := lipgloss.JoinHorizontal(lipgloss.Top, leftPanel, rightPanel)
 	output = append(output, panels)
-	output = append(output, "")
+
+	// Footer separator (matching browse view structure)
+	output = append(output, "  "+strings.Repeat("─", m.state.Width-4))
 
 	// Status/Error message
 	var statusLine string
@@ -396,7 +405,7 @@ func (m Model) renderDescribeView() string {
 	}
 	output = append(output, statusLine)
 
-	// Help
+	// Help (matching browse view structure)
 	help := "x:mask  c:copy  e:edit  tab/⇧tab:version  l:latest  ↑↓:scroll  ←→:horiz  w:wrap  esc:back  q:quit"
 	output = append(output, helpStyle.Render("  "+help))
 
