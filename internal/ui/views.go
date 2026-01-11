@@ -3,6 +3,7 @@ package ui
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/lipgloss"
 	"github.com/yachiko/clerk/internal/cache"
@@ -184,8 +185,20 @@ func (m Model) renderBrowseView() string {
 	} else if m.state.StatusMessage != "" {
 		statusLine = statusStyle.Render("  ✓ " + m.state.StatusMessage)
 	} else {
-		// Stats
+		// Stats with offline mode indicator
 		stats := fmt.Sprintf("%d/%d parameters", len(m.state.FilteredItems), len(m.state.Entries))
+
+		// Add offline mode indicator or cache age
+		if m.state.OfflineMode {
+			stats += " [Offline Mode]"
+		} else if m.state.CacheAge > 0 {
+			// Show cache age if older than 1 minute
+			if m.state.CacheAge > time.Minute {
+				cacheAge := formatDuration(m.state.CacheAge)
+				stats += fmt.Sprintf(" [Cached: %s ago]", cacheAge)
+			}
+		}
+
 		statusLine = dimStyle.Render("  " + stats)
 	}
 	lines = append(lines, statusLine)
@@ -194,9 +207,9 @@ func (m Model) renderBrowseView() string {
 	var help string
 	sortLabel := m.getSortLabel()
 	if m.state.Mode == ViewModeTree {
-		help = fmt.Sprintf("↑↓:navigate  d:describe  e:edit  c:copy  m:move  p:copy  space:expand  s:sort(%s)  /:search  q:quit", sortLabel)
+		help = fmt.Sprintf("↑↓:navigate  d:describe  e:edit  c:copy  m:move  p:copy  space:expand  s:sort(%s)  r:refresh  /:search  q:quit", sortLabel)
 	} else {
-		help = fmt.Sprintf("↑↓:navigate  d:describe  e:edit  c:copy  m:move  p:copy  t:tree  s:sort(%s)  /:search  q:quit", sortLabel)
+		help = fmt.Sprintf("↑↓:navigate  d:describe  e:edit  c:copy  m:move  p:copy  t:tree  s:sort(%s)  r:refresh  /:search  q:quit", sortLabel)
 	}
 	lines = append(lines, helpStyle.Render("  "+help+"  "))
 
@@ -376,6 +389,8 @@ func (m Model) renderDescribeView() string {
 		statusLine = errorStyle.Render("  ✗ " + m.state.ErrorMessage)
 	} else if m.state.StatusMessage != "" {
 		statusLine = statusStyle.Render("  ✓ " + m.state.StatusMessage)
+	} else if m.state.OfflineMode {
+		statusLine = dimStyle.Render("  [Offline Mode - Values unavailable]")
 	} else {
 		statusLine = ""
 	}
@@ -687,4 +702,18 @@ func centerDialog(content string, width, height int) string {
 		lipgloss.WithWhitespaceChars(" "),
 		lipgloss.WithWhitespaceForeground(lipgloss.Color("236")),
 	)
+}
+
+// formatDuration formats a duration in a human-readable way
+func formatDuration(d time.Duration) string {
+	if d < time.Minute {
+		return fmt.Sprintf("%ds", int(d.Seconds()))
+	}
+	if d < time.Hour {
+		return fmt.Sprintf("%dm", int(d.Minutes()))
+	}
+	if d < 24*time.Hour {
+		return fmt.Sprintf("%dh", int(d.Hours()))
+	}
+	return fmt.Sprintf("%dd", int(d.Hours()/24))
 }

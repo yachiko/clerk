@@ -22,24 +22,30 @@ type Manager struct {
 	data      *CacheData
 	mu        sync.RWMutex
 	lockFile  string
+	region    string
+	accountID string
 }
 
 // NewManager creates a new cache manager
-func NewManager(cfg *config.Config) (*Manager, error) {
-	cachePath := cfg.CachePath
-	if cachePath == "" {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return nil, fmt.Errorf("failed to get home directory: %w", err)
-		}
-		cachePath = filepath.Join(home, ".clerk", "cache.json")
+// region and accountID are used to scope the cache file
+func NewManager(cfg *config.Config, region, accountID string) (*Manager, error) {
+	var cachePath string
+
+	// Always use the new structure: ~/.clerk/cache/<accountID>/<region>.json
+	// Ignore old CachePath setting (it was a file path, not a directory)
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get home directory: %w", err)
 	}
+	cachePath = filepath.Join(home, ".clerk", "cache", accountID, region+".json")
 
 	m := &Manager{
 		cachePath: cachePath,
 		ttl:       cfg.CacheTTL,
 		lockFile:  cachePath + ".lock",
 		data:      &CacheData{Entries: []CacheEntry{}},
+		region:    region,
+		accountID: accountID,
 	}
 
 	_ = m.load()
@@ -62,15 +68,16 @@ func (m *Manager) load() error {
 
 // save writes cache to disk with file locking
 func (m *Manager) save() error {
-	if err := m.acquireLock(); err != nil {
-		return fmt.Errorf("failed to acquire cache lock: %w", err)
-	}
-	defer m.releaseLock()
-
+	// Create directory first (before trying to create lock file)
 	dir := filepath.Dir(m.cachePath)
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return fmt.Errorf("failed to create cache directory: %w", err)
 	}
+
+	if err := m.acquireLock(); err != nil {
+		return fmt.Errorf("failed to acquire cache lock: %w", err)
+	}
+	defer m.releaseLock()
 
 	data, err := json.MarshalIndent(m.data, "", "  ")
 	if err != nil {
@@ -120,6 +127,17 @@ func (m *Manager) IsExpired() bool {
 		return true
 	}
 	return time.Since(m.data.LastRefresh) > m.ttl
+}
+
+// GetAge returns the duration since last refresh
+func (m *Manager) GetAge() time.Duration {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	if m.data.LastRefresh.IsZero() {
+		return time.Duration(0)
+	}
+	return time.Since(m.data.LastRefresh)
 }
 
 // GetStats returns cache statistics

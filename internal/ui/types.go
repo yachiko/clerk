@@ -1,6 +1,10 @@
 package ui
 
-import "github.com/yachiko/clerk/internal/cache"
+import (
+	"time"
+
+	"github.com/yachiko/clerk/internal/cache"
+)
 
 // ViewMode represents the current view mode
 type ViewMode int
@@ -68,6 +72,10 @@ type State struct {
 	// Messages
 	StatusMessage string
 	ErrorMessage  string
+
+	// Offline mode
+	OfflineMode bool
+	CacheAge    time.Duration
 }
 
 // HistoryEntry represents a version history entry

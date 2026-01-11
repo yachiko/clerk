@@ -44,11 +44,13 @@ Support 'c' key in browse view to copy latest secret value to clipboard without 
 
 # The cache 
 
-The tool needs to implement robust caching mechanism to store secret names locally to improve performance when browsing and searching through secrets. The cache will be stored in a local file (e.g., JSON or YAML format) and will be updated whenever the user performs operations that modify the secrets (add, update, delete). The cache should also have a refresh command to manually update the cache from AWS Parameter Store. The cache file location can be configurable via environment variable or config file. Cache TTL (time-to-live) should be implemented to automatically refresh the cache after a certain period. 
+The tool implements a robust caching mechanism to store secret names locally to improve performance when browsing and searching through secrets. The cache is stored in region and account-scoped files to support multi-region and multi-account setups. Cache files are organized as `$HOME/.clerk/cache/<account_id>/<region>.json`. This allows users to seamlessly switch between regions and AWS accounts without cache conflicts or expensive re-fetches.
+
+The cache will be updated whenever the user performs operations that modify the secrets (add, update, delete). The cache should also have a refresh command to manually update the cache from AWS Parameter Store. The cache file location base directory can be configurable via environment variable or config file. Cache TTL (time-to-live) should be implemented to automatically refresh the cache after a certain period. 
 
 Have lock on the cache file to prevent concurrent writes.
 
-The refresh process also should be optimized for parallel fetching of secrets metadata to speed up the process. The values of the secrets should not be cached, only names and metadata (tags, version, created date, modified date).
+The refresh process is optimized for parallel fetching of secrets metadata to speed up the process. The values of the secrets are not cached, only names and metadata (tags, version, created date, modified date).
 
 # AWS Configuration & Authentication
 
@@ -122,14 +124,16 @@ Generate comprehensive documentation for the CLI tool, including installation in
 
 - default region: us-east-1
 - default profile: default
-- cache location: $HOME/.clerk/cache.json
+- cache location: $HOME/.clerk/cache/ (base directory, region/account subdirectories created automatically)
 - cache TTL: 3h
 - clipboard clear timeout: 60s
 - default parameter type: SecureString
 - default sort order for list command: by name
 - parallel fetches for refresh command: 10
+- browse auto refresh: true
+- browse refresh cooldown: 5m
 
-Config kep in json file located at $HOME/.clerk/config.json. 
+Config kept in json file located at $HOME/.clerk/config.json. 
 
 # Exit codes 
 
@@ -138,8 +142,8 @@ Config kep in json file located at $HOME/.clerk/config.json.
 - 2: AWS SDK error
 - 3: Invalid input
 
-# Misc
-
+# Misc (yet - planned for future).
+Multi-region and multi-account support via region/account-scoped cache files
 Only Parameter Store is supported, no support for AWS Secrets Manager.
 Single region only.
 Handle Ctrl+c gracefully, exit the tool without leaving temp files or corrupted state.
