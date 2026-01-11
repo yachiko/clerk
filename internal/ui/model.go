@@ -790,22 +790,24 @@ func (m Model) handleDescribeKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case "tab":
-		// Navigate to older version (increase index)
+		// Navigate to older version (increase index), loop to beginning
 		if m.state.HistoryIndex < len(m.state.DescribeHistory)-1 {
 			m.state.HistoryIndex++
-			// Update value and trigger lazy load if needed
-			return m.updateSelectedVersion()
+		} else {
+			m.state.HistoryIndex = 0
 		}
-		return m, nil
+		// Update value and trigger lazy load if needed
+		return m.updateSelectedVersion()
 
 	case "shift+tab":
-		// Navigate to newer version (decrease index)
+		// Navigate to newer version (decrease index), loop to end
 		if m.state.HistoryIndex > 0 {
 			m.state.HistoryIndex--
-			// Update value and trigger lazy load if needed
-			return m.updateSelectedVersion()
+		} else {
+			m.state.HistoryIndex = len(m.state.DescribeHistory) - 1
 		}
-		return m, nil
+		// Update value and trigger lazy load if needed
+		return m.updateSelectedVersion()
 
 	case "g":
 		// Jump to latest version (go to latest)
