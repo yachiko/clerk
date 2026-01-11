@@ -78,8 +78,8 @@ func runRefresh(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to create AWS client: %w", err)
 	}
 
-	// Initialize cache manager
-	cacheMgr, err := cache.NewManager(cfg)
+	// Initialize cache manager with region and account ID
+	cacheMgr, err := cache.NewManager(cfg, client.GetRegion(), client.GetAccountID())
 	if err != nil {
 		return fmt.Errorf("failed to initialize cache: %w", err)
 	}

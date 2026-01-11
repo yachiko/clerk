@@ -119,8 +119,8 @@ func runDelete(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to delete parameter: %w", err)
 	}
 
-	// Remove from cache
-	cacheMgr, err := cache.NewManager(cfg)
+	// Remove from cache with region and account ID
+	cacheMgr, err := cache.NewManager(cfg, client.GetRegion(), client.GetAccountID())
 	if err == nil {
 		_ = cacheMgr.Delete(name)
 	}

@@ -90,15 +90,15 @@ deps:
 	$(GOMOD) download
 	$(GOMOD) tidy
 
-## Install binary to GOPATH/bin
+## Install binary to /usr/local/bin
 install: build
 	@echo "Installing $(BINARY_NAME)..."
-	cp $(BINARY_PATH) $(GOPATH)/bin/$(BINARY_NAME)
+	cp $(BINARY_PATH) /usr/local/bin/$(BINARY_NAME)
 
-## Uninstall binary from GOPATH/bin
+## Uninstall binary from /usr/local/bin
 uninstall:
 	@echo "Uninstalling $(BINARY_NAME)..."
-	rm -f $(GOPATH)/bin/$(BINARY_NAME)
+	rm -f /usr/local/bin/$(BINARY_NAME)
 
 ## Build for all platforms
 release:

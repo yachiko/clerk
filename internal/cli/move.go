@@ -135,8 +135,8 @@ func runMove(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to delete source parameter: %w (rollback also failed: %v)", err, deleteErr)
 	}
 
-	// Update cache
-	cacheMgr, err := cache.NewManager(cfg)
+	// Update cache with region and account ID
+	cacheMgr, err := cache.NewManager(cfg, client.GetRegion(), client.GetAccountID())
 	if err != nil {
 		return fmt.Errorf("failed to initialize cache: %w", err)
 	}

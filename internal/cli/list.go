@@ -79,24 +79,7 @@ func runList(cmd *cobra.Command, args []string) error {
 	}
 	sortBy = normalizeSortOption(sortBy)
 
-	// Try to use cache first
-	cacheMgr, err := cache.NewManager(cfg)
-	if err != nil {
-		return fmt.Errorf("failed to initialize cache: %w", err)
-	}
-
-	var entries []cache.CacheEntry
-
-	// Check if cache is valid
-	if !cacheMgr.IsExpired() {
-		entries = cacheMgr.Search(path)
-		if len(entries) > 0 {
-			entries = cacheMgr.Sort(entries, sortBy)
-			return outputList(entries, sortBy)
-		}
-	}
-
-	// Cache miss or expired - fetch from AWS
+	// Create AWS client first (needed for cache manager)
 	region := globalOpts.Region
 	if region == "" && cfg.Region != "" {
 		region = cfg.Region
@@ -122,7 +105,24 @@ func runList(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to create AWS client: %w", err)
 	}
 
-	// Determine if we should use path-based or filter-based listing
+	// Initialize cache with region and account ID
+	cacheMgr, err := cache.NewManager(cfg, client.GetRegion(), client.GetAccountID())
+	if err != nil {
+		return fmt.Errorf("failed to initialize cache: %w", err)
+	}
+
+	var entries []cache.CacheEntry
+
+	// Check if cache is valid
+	if !cacheMgr.IsExpired() {
+		entries = cacheMgr.Search(path)
+		if len(entries) > 0 {
+			entries = cacheMgr.Sort(entries, sortBy)
+			return outputList(entries, sortBy)
+		}
+	}
+
+	// Cache miss or expired - fetch from AWS
 	basePath := extractBasePath(path)
 	params, err := client.ListParameters(ctx, basePath, true)
 	if err != nil {

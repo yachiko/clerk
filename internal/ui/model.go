@@ -3,6 +3,7 @@ package ui
 import (
 	"context"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -55,17 +56,111 @@ func (m Model) Init() tea.Cmd {
 		tea.EnterAltScreen,
 		tea.EnableMouseAllMotion,
 		m.loadEntries,
+		m.checkBackgroundRefresh,
 	)
 }
 
 // loadEntries loads entries from cache
 func (m Model) loadEntries() tea.Msg {
 	entries := m.cache.GetAll()
+	// Update cache age
+	m.state.CacheAge = m.cache.GetAge()
 	return entriesLoadedMsg{entries: entries}
+}
+
+// checkBackgroundRefresh checks if cache should be refreshed in background
+func (m Model) checkBackgroundRefresh() tea.Msg {
+	// Skip if auto-refresh is disabled
+	if !m.config.BrowseAutoRefresh {
+		return nil
+	}
+
+	// Check if cache is empty (first run)
+	if len(m.cache.GetAll()) == 0 {
+		return backgroundRefreshStartMsg{}
+	}
+
+	// Check cache age
+	cacheAge := m.cache.GetAge()
+	if cacheAge < m.config.BrowseRefreshCooldown {
+		// Cache is fresh, no refresh needed
+		return nil
+	}
+
+	// Cache is stale, trigger background refresh
+	return backgroundRefreshStartMsg{}
+}
+
+// doBackgroundRefresh performs cache refresh in background with live progress
+func (m Model) doBackgroundRefresh() tea.Cmd {
+	return func() tea.Msg {
+		// This will be replaced by the streaming version
+		return startRefreshWithProgress(m.cache, m.client, m.config)
+	}
+}
+
+// startRefreshWithProgress starts the refresh and returns a sub for progress updates
+func startRefreshWithProgress(cacheMgr *cache.Manager, client *aws.Client, cfg *config.Config) tea.Msg {
+	// Create a channel for progress
+	progressCh := make(chan int, 100)
+
+	// Start refresh in background
+	go func() {
+		ctx := context.Background()
+
+		progressCallback := func(current, total int) {
+			select {
+			case progressCh <- current:
+			default:
+				// Channel full, skip this update
+			}
+		}
+
+		// Use the actual region from the client, not config
+		err := cacheMgr.Refresh(ctx, client, client.GetRegion(), cfg.ParallelFetches, progressCallback)
+
+		// Signal completion
+		close(progressCh)
+
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "[ERROR] Background refresh failed: %v\n", err)
+		}
+	}()
+
+	// Return a message that starts listening for progress
+	return refreshProgressChannelMsg{ch: progressCh}
+}
+
+// refreshProgressChannelMsg carries the progress channel
+type refreshProgressChannelMsg struct {
+	ch chan int
+}
+
+// waitForProgress returns a command that waits for the next progress update
+func waitForProgress(ch chan int) tea.Cmd {
+	return func() tea.Msg {
+		count, ok := <-ch
+		if !ok {
+			// Channel closed, refresh is done
+			return backgroundRefreshCompleteMsg{loadFromCache: true}
+		}
+		return backgroundRefreshProgressMsg{current: count, ch: ch}
+	}
 }
 
 type entriesLoadedMsg struct {
 	entries []cache.CacheEntry
+}
+
+type backgroundRefreshStartMsg struct{}
+type backgroundRefreshProgressMsg struct {
+	current int
+	ch      chan int
+}
+type backgroundRefreshCompleteMsg struct {
+	entries       []cache.CacheEntry
+	err           error
+	loadFromCache bool // If true, load entries from cache instead of using provided entries
 }
 
 type statusMsg string
@@ -252,7 +347,53 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case entriesLoadedMsg:
 		m.state.Entries = msg.entries
+		m.state.CacheAge = m.cache.GetAge()
 		m.filterEntries()
+		return m, nil
+
+	case backgroundRefreshStartMsg:
+		// Show appropriate message based on whether cache is empty
+		if len(m.state.Entries) == 0 {
+			m.state.StatusMessage = "Loading parameters from AWS..."
+		} else {
+			m.state.StatusMessage = "Refreshing cache in background..."
+		}
+		return m, m.doBackgroundRefresh()
+
+	case refreshProgressChannelMsg:
+		// Start listening for progress updates
+		return m, waitForProgress(msg.ch)
+
+	case backgroundRefreshProgressMsg:
+		// Update status with current count
+		if len(m.state.Entries) == 0 {
+			m.state.StatusMessage = fmt.Sprintf("Loading parameters from AWS... (%d loaded)", msg.current)
+		} else {
+			m.state.StatusMessage = fmt.Sprintf("Refreshing cache... (%d loaded)", msg.current)
+		}
+		// Continue waiting for more progress
+		return m, waitForProgress(msg.ch)
+
+	case backgroundRefreshCompleteMsg:
+		// Load entries from cache
+		entries := m.cache.GetAll()
+
+		if len(entries) == 0 {
+			// Refresh failed - user is offline
+			m.state.OfflineMode = true
+			m.state.StatusMessage = ""
+		} else {
+			m.state.OfflineMode = false
+			m.state.Entries = entries
+			m.state.CacheAge = m.cache.GetAge()
+			m.filterEntries()
+			// Show count of loaded parameters
+			count := len(entries)
+			m.state.StatusMessage = fmt.Sprintf("Cache refreshed - %d parameters loaded", count)
+			return m, tea.Tick(3*time.Second, func(t time.Time) tea.Msg {
+				return clearStatusMsg{}
+			})
+		}
 		return m, nil
 
 	case statusMsg:
@@ -480,6 +621,11 @@ func (m Model) handleBrowseKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// Update PreviousMode when in browse mode (not describe)
 		m.state.PreviousMode = m.state.Mode
 		return m, nil
+
+	case "r":
+		// Manual refresh cache
+		m.state.StatusMessage = "Refreshing cache..."
+		return m, m.doBackgroundRefresh()
 
 	case "s":
 		// Cycle through sort options: name -> modified -> version -> name
@@ -994,6 +1140,13 @@ func (m Model) loadDescribe(name string) tea.Cmd {
 		// Get current value
 		param, err := m.client.GetParameter(ctx, name, true)
 		if err != nil {
+			// Check if it's an auth/network error
+			errMsg := err.Error()
+			if strings.Contains(errMsg, "auth") || strings.Contains(errMsg, "credential") ||
+				strings.Contains(errMsg, "unauthorized") || strings.Contains(errMsg, "connection") ||
+				strings.Contains(errMsg, "network") {
+				return errorMsg("Unable to retrieve secret value. Check your AWS credentials and network connection.")
+			}
 			return errorMsg("Failed to load parameter: " + err.Error())
 		}
 
@@ -1062,6 +1215,13 @@ func (m Model) copySecret(name string) tea.Cmd {
 
 		param, err := m.client.GetParameter(ctx, name, true)
 		if err != nil {
+			// Check if it's an auth/network error
+			errMsg := err.Error()
+			if strings.Contains(errMsg, "auth") || strings.Contains(errMsg, "credential") ||
+				strings.Contains(errMsg, "unauthorized") || strings.Contains(errMsg, "connection") ||
+				strings.Contains(errMsg, "network") {
+				return errorMsg("Unable to retrieve secret value. Check your AWS credentials and network connection.")
+			}
 			return errorMsg("Failed to get secret: " + err.Error())
 		}
 

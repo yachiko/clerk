@@ -17,6 +17,8 @@ type Config struct {
 	DescribeMaxItems         int32         `json:"describe_max_items"`
 	DescribeVersionBatchSize int           `json:"describe_version_batch_size"`
 	DecryptByDefault         bool          `json:"decrypt_by_default"`
+	BrowseAutoRefresh        bool          `json:"browse_auto_refresh"`
+	BrowseRefreshCooldown    time.Duration `json:"browse_refresh_cooldown"`
 }
 
 // DefaultConfig returns a Config with default values
@@ -35,6 +37,8 @@ func DefaultConfig() *Config {
 		DescribeMaxItems:         0, // 0 = unlimited
 		DescribeVersionBatchSize: 10,
 		DecryptByDefault:         true,
+		BrowseAutoRefresh:        true,
+		BrowseRefreshCooldown:    5 * time.Minute,
 	}
 }
 

@@ -138,8 +138,8 @@ func runPut(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to put parameter: %w", err)
 	}
 
-	// Update cache
-	cacheMgr, err := cache.NewManager(cfg)
+	// Update cache with region and account ID
+	cacheMgr, err := cache.NewManager(cfg, client.GetRegion(), client.GetAccountID())
 	if err == nil {
 		cacheEntry := cache.CacheEntry{
 			Name:             name,

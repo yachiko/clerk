@@ -9,12 +9,15 @@ import (
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/ssm"
 	"github.com/aws/aws-sdk-go-v2/service/ssm/types"
+	"github.com/aws/aws-sdk-go-v2/service/sts"
 )
 
 // Client wraps the AWS SSM client
 type Client struct {
 	ssm              *ssm.Client
+	sts              *sts.Client
 	region           string
+	accountID        string
 	describePageSize int32
 	describeMaxItems int32
 }
@@ -48,9 +51,20 @@ func NewClient(ctx context.Context, opts ClientOptions) (*Client, error) {
 		pageSize = 50 // Default to maximum
 	}
 
+	// Create STS client to get account ID
+	stsClient := sts.NewFromConfig(cfg)
+
+	// Get account ID
+	identity, err := stsClient.GetCallerIdentity(ctx, &sts.GetCallerIdentityInput{})
+	if err != nil {
+		return nil, fmt.Errorf("failed to get AWS account ID: %w", err)
+	}
+
 	return &Client{
 		ssm:              ssm.NewFromConfig(cfg),
+		sts:              stsClient,
 		region:           cfg.Region,
+		accountID:        aws.ToString(identity.Account),
 		describePageSize: pageSize,
 		describeMaxItems: opts.DescribeMaxItems,
 	}, nil
@@ -368,4 +382,14 @@ func matchGlob(pattern, name string) bool {
 	}
 
 	return pattern == name
+}
+
+// GetRegion returns the AWS region for this client
+func (c *Client) GetRegion() string {
+	return c.region
+}
+
+// GetAccountID returns the AWS account ID for this client
+func (c *Client) GetAccountID() string {
+	return c.accountID
 }

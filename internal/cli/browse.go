@@ -89,22 +89,13 @@ func runBrowse(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to create AWS client: %w", err)
 	}
 
-	// Initialize cache
-	cacheMgr, err := cache.NewManager(cfg)
+	// Initialize cache with region and account ID
+	cacheMgr, err := cache.NewManager(cfg, client.GetRegion(), client.GetAccountID())
 	if err != nil {
 		return fmt.Errorf("failed to initialize cache: %w", err)
 	}
 
-	// Always refresh cache if empty or expired
-	if cacheMgr.IsExpired() || len(cacheMgr.GetAll()) == 0 {
-		fmt.Println("Loading parameters...")
-		err = cacheMgr.Refresh(ctx, client, region, cfg.ParallelFetches, nil)
-		if err != nil {
-			return fmt.Errorf("failed to refresh cache: %w", err)
-		}
-	}
-
-	// Create and run UI (with new context for UI operations)
+	// Create and run UI immediately - background refresh will load data
 	model := ui.NewModel(client, cacheMgr, cfg)
 	p := tea.NewProgram(model, tea.WithAltScreen())
 
