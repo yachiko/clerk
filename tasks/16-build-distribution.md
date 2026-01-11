@@ -313,34 +313,34 @@ clerk browse
 
 ## Commands
 
-| Command | Description |
-|---------|-------------|
-| `put` | Create or update a secret |
-| `get` | Retrieve a secret value |
-| `delete` | Delete a secret |
-| `list` | List secrets with filtering |
-| `cp` | Copy a secret to a new path |
-| `mv` | Move/rename a secret |
-| `browse` | Interactive terminal UI |
-| `refresh` | Refresh the local cache |
-| `config` | Manage configuration |
-| `completion` | Generate shell completions |
-| `version` | Show version information |
+| Command      | Description                 |
+| ------------ | --------------------------- |
+| `put`        | Create or update a secret   |
+| `get`        | Retrieve a secret value     |
+| `delete`     | Delete a secret             |
+| `list`       | List secrets with filtering |
+| `cp`         | Copy a secret to a new path |
+| `mv`         | Move/rename a secret        |
+| `browse`     | Interactive terminal UI     |
+| `refresh`    | Refresh the local cache     |
+| `config`     | Manage configuration        |
+| `completion` | Generate shell completions  |
+| `version`    | Show version information    |
 
 ## Configuration
 
 Configuration is stored in `~/.clerk/config.json`.
 
-| Option | Default | Description |
-|--------|---------|-------------|
-| `region` | `us-east-1` | AWS region |
-| `profile` | `default` | AWS profile |
-| `cache_path` | `~/.clerk/cache.json` | Cache file location |
-| `cache_ttl` | `3h` | Cache time-to-live |
-| `clipboard_timeout` | `60s` | Clear clipboard after duration |
-| `default_type` | `SecureString` | Default parameter type |
-| `default_sort` | `name` | Default sort order |
-| `parallel_fetches` | `10` | Concurrent API calls for refresh |
+| Option              | Default               | Description                      |
+| ------------------- | --------------------- | -------------------------------- |
+| `region`            | `us-east-1`           | AWS region                       |
+| `profile`           | `default`             | AWS profile                      |
+| `cache_path`        | `~/.clerk/cache.json` | Cache file location              |
+| `cache_ttl`         | `3h`                  | Cache time-to-live               |
+| `clipboard_timeout` | `60s`                 | Clear clipboard after duration   |
+| `default_type`      | `SecureString`        | Default parameter type           |
+| `default_sort`      | `name`                | Default sort order               |
+| `parallel_fetches`  | `10`                  | Concurrent API calls for refresh |
 
 ## Browse Mode
 
@@ -348,21 +348,21 @@ The browse mode provides a k9s-style interface for managing secrets.
 
 ### Keyboard Shortcuts
 
-| Key | Action |
-|-----|--------|
-| `↑/↓` or `j/k` | Navigate up/down |
-| `PgUp/PgDn` | Move page up/down |
-| `Home/End` | Jump to first/last |
-| `d` or `Enter` | Describe secret |
-| `c` | Copy value to clipboard |
-| `e` | Edit in $EDITOR |
-| `Delete` | Delete (with confirmation) |
-| `/` | Search/filter |
-| `t` | Toggle tree/flat view |
-| `Space` | Expand/collapse (tree view) |
-| `x` | Toggle value masking (describe view) |
-| `Esc` | Back/cancel |
-| `q` | Quit |
+| Key            | Action                               |
+| -------------- | ------------------------------------ |
+| `↑/↓` or `j/k` | Navigate up/down                     |
+| `PgUp/PgDn`    | Move page up/down                    |
+| `Home/End`     | Jump to first/last                   |
+| `d` or `Enter` | Describe secret                      |
+| `c`            | Copy value to clipboard              |
+| `e`            | Edit in $EDITOR                      |
+| `Delete`       | Delete (with confirmation)           |
+| `/`            | Search/filter                        |
+| `t`            | Toggle tree/flat view                |
+| `Space`        | Expand/collapse (tree view)          |
+| `x`            | Toggle value masking (describe view) |
+| `Esc`          | Back/cancel                          |
+| `q`            | Quit                                 |
 
 ## Shell Completion
 
