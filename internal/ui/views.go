@@ -372,9 +372,9 @@ func (m Model) renderDescribeView() string {
 	}
 
 	// Calculate available height for panels
-	// Title(1) + empty(1) + box(~7) + separator(1) + panels + separator(1) + status(1) + help(1) = Height
-	// Approximate box height: 5-7 lines
-	panelHeight := m.state.Height - 13
+	// Title(1) + empty(1) + header(1-2) + separator(1) + panels + separator(1) + status(1) + help(1) = Height
+	// Header is now compact: 1-2 lines instead of 5-7
+	panelHeight := m.state.Height - 8
 	if panelHeight < 10 {
 		panelHeight = 10
 	}
@@ -389,6 +389,14 @@ func (m Model) renderDescribeView() string {
 	panels := lipgloss.JoinHorizontal(lipgloss.Top, leftPanel, rightPanel)
 	output = append(output, panels)
 
+	// Calculate how many lines we have so far to properly pad
+	linesUsed := 1 + 1 + strings.Count(box, "\n") + 1 + 1 + strings.Count(panels, "\n") + 1 + 1 + 1
+	// Pad to fill space (similar to browse view)
+	for linesUsed < m.state.Height {
+		output = append(output, "")
+		linesUsed++
+	}
+
 	// Footer separator (matching browse view structure)
 	output = append(output, "  "+strings.Repeat("─", m.state.Width-4))
 
@@ -401,13 +409,14 @@ func (m Model) renderDescribeView() string {
 	} else if m.state.OfflineMode {
 		statusLine = dimStyle.Render("  [Offline Mode - Values unavailable]")
 	} else {
-		statusLine = ""
+		// Show empty line to match browse view when there's no status
+		statusLine = dimStyle.Render("  ")
 	}
 	output = append(output, statusLine)
 
-	// Help (matching browse view structure)
+	// Help (matching browse view structure - same formatting as browse)
 	help := "x:mask  c:copy  e:edit  tab/⇧tab:version  l:latest  ↑↓:scroll  ←→:horiz  w:wrap  esc:back  q:quit"
-	output = append(output, helpStyle.Render("  "+help))
+	output = append(output, helpStyle.Render("  "+help+"  "))
 
 	return strings.Join(output, "\n")
 }
@@ -462,10 +471,8 @@ func (m Model) renderVersionHistoryPanel(width, height int) string {
 
 	content := strings.Join(lines, "\n")
 
+	// Flat style without borders
 	panelStyle := lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(lipgloss.Color("252")).
-		Padding(0, 1).
 		MarginLeft(2).
 		Width(width).
 		Height(height)
@@ -601,10 +608,8 @@ func (m Model) renderValuePanel(width, height int) string {
 
 	content := strings.Join(lines, "\n")
 
+	// Flat style without borders
 	panelStyle := lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(lipgloss.Color("252")).
-		Padding(0, 1).
 		MarginRight(2).
 		Width(width).
 		Height(height)
@@ -620,35 +625,63 @@ func min(a, b int) int {
 	return b
 }
 
-// renderDescribeBox renders the parameter info box
+// renderDescribeBox renders the parameter info as a compact header line
 func (m Model) renderDescribeBox(entry *cache.CacheEntry) string {
-	var lines []string
+	// Use the same layout as browse view data rows (not header)
+	showModified := m.state.Width >= 100
+	var nameWidth int
+	var line string
 
-	lines = append(lines, fmt.Sprintf("%s %s", labelStyle.Render("Name:"), entry.Name))
-	lines = append(lines, fmt.Sprintf("%s %s", labelStyle.Render("Type:"), entry.Type))
-	lines = append(lines, fmt.Sprintf("%s %d", labelStyle.Render("Version:"), entry.Version))
-	lines = append(lines, fmt.Sprintf("%s %s", labelStyle.Render("Modified:"), entry.LastModifiedDate.Format("2006-01-02 15:04:05")))
+	if showModified {
+		// Fixed: 3 (spaces) + 12 (TYPE) + 3 (spaces) + 8 (VERSION) + 3 (spaces) + 16 (MODIFIED) + 2 (padding) = 47
+		nameWidth = m.state.Width - 47 - 2
+		if nameWidth < 20 {
+			nameWidth = 20
+		}
+		name := entry.Name
+		if len(name) > nameWidth-2 {
+			name = name[:nameWidth-2]
+		}
+		modifiedStr := entry.LastModifiedDate.Format("2006-01-02 15:04")
+		// Format first without styling (same as browse view)
+		line = fmt.Sprintf("  %-*s   %-12s   %8d   %16s  ",
+			nameWidth,
+			name,
+			entry.Type,
+			entry.Version,
+			modifiedStr)
+	} else {
+		// Fixed: 3 (spaces) + 12 (TYPE) + 3 (spaces) + 8 (VERSION) = 26
+		nameWidth = m.state.Width - 26 - 2
+		if nameWidth < 20 {
+			nameWidth = 20
+		}
+		name := entry.Name
+		if len(name) > nameWidth-2 {
+			name = name[:nameWidth-2]
+		}
+		// Format first without styling (same as browse view)
+		line = fmt.Sprintf("  %-*s   %-12s   %8d",
+			nameWidth,
+			name,
+			entry.Type,
+			entry.Version)
+	}
 
+	// Apply styling to the whole line (like browse view does for normal rows)
+	info := normalStyle.Render(line)
+
+	// Add tags on second line if present
 	if len(entry.Tags) > 0 {
 		var tagPairs []string
 		for k, v := range entry.Tags {
 			tagPairs = append(tagPairs, fmt.Sprintf("%s=%s", k, v))
 		}
-		lines = append(lines, fmt.Sprintf("%s %s", labelStyle.Render("Tags:"), strings.Join(tagPairs, ", ")))
+		tagsLine := dimStyle.Render("  Tags: " + strings.Join(tagPairs, ", "))
+		return info + "\n" + tagsLine
 	}
 
-	content := strings.Join(lines, "\n")
-	// Account for left and right margins
-	boxWidth := m.state.Width - 6 // Total rendered width = boxWidth + margins
-	if boxWidth < 60 {
-		boxWidth = 60
-	}
-	boxStyle := borderStyle.
-		Width(boxWidth).
-		Padding(0, 1).
-		MarginLeft(2).
-		MarginRight(2)
-	return boxStyle.Render(content)
+	return info
 }
 
 // renderConfirmDialog renders the confirmation dialog overlay
