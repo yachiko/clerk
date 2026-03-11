@@ -24,16 +24,18 @@ var (
 // InitGetCommand initializes the GET command
 func InitGetCommand() *cobra.Command {
 	getCmd := &cobra.Command{
-		Use:   "get <name[@version]>",
+		Use:   "get <name[@version|:label]>",
 		Short: "Retrieve a secret from AWS Parameter Store",
 		Long: `Retrieve the value of a secret from AWS Parameter Store.
 
 By default, the secret is decrypted and displayed. Use --mask to show
 a masked version of the value.
 
-You can specify a version using the @version syntax:
-  - /dev/secret@3    - get version 3
-  - /dev/secret@latest - get latest version (default)
+You can specify a version or label:
+  - /dev/secret@3        - get version 3
+  - /dev/secret@latest   - get latest version (default)
+  - /dev/secret:prod     - get version with label "prod"
+  - /dev/secret:staging  - get version with label "staging"
 
 Examples:
   # Get the latest version of a secret
@@ -41,6 +43,9 @@ Examples:
 
   # Get a specific version
   clerk get "/dev/db_password@2"
+
+  # Get by label
+  clerk get "/dev/db_password:prod"
 
   # Get with masked value
   clerk get "/dev/db_password" --mask
@@ -64,10 +69,10 @@ func runGet(cmd *cobra.Command, args []string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	nameWithVersion := args[0]
+	nameWithVersionOrLabel := args[0]
 
-	// Parse name and version
-	name, version, err := parseNameAndVersion(nameWithVersion)
+	// Parse name, version, and label
+	name, version, label, err := parseNameVersionLabel(nameWithVersionOrLabel)
 	if err != nil {
 		return err
 	}
@@ -110,18 +115,32 @@ func runGet(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to create AWS client: %w", err)
 	}
 
-	// Get parameter
+	// Get parameter (prioritize label over version)
 	var param *aws.Parameter
-	if version > 0 {
+	if label != "" {
+		param, err = client.GetParameterByLabel(ctx, name, label, !getMask)
+		if err != nil {
+			if aws.IsParameterNotFoundError(err) {
+				return fmt.Errorf("parameter with label %q not found: %s", label, name)
+			}
+			return fmt.Errorf("failed to get parameter by label: %w", err)
+		}
+	} else if version > 0 {
 		param, err = client.GetParameterByVersion(ctx, name, version, !getMask)
+		if err != nil {
+			if aws.IsParameterNotFoundError(err) {
+				return fmt.Errorf("parameter version %d not found: %s", version, name)
+			}
+			return fmt.Errorf("failed to get parameter version: %w", err)
+		}
 	} else {
 		param, err = client.GetParameter(ctx, name, !getMask)
-	}
-	if err != nil {
-		if aws.IsParameterNotFoundError(err) {
-			return fmt.Errorf("parameter not found: %s", name)
+		if err != nil {
+			if aws.IsParameterNotFoundError(err) {
+				return fmt.Errorf("parameter not found: %s", name)
+			}
+			return fmt.Errorf("failed to get parameter: %w", err)
 		}
-		return fmt.Errorf("failed to get parameter: %w", err)
 	}
 
 	// Handle value masking
@@ -134,11 +153,26 @@ func runGet(cmd *cobra.Command, args []string) error {
 	return outputParameter(param, displayValue)
 }
 
-// parseNameAndVersion parses "name@version" format
-func parseNameAndVersion(input string) (string, int64, error) {
+// parseNameVersionLabel parses "name@version" or "name:label" format
+// Returns name, version, label, error
+func parseNameVersionLabel(input string) (string, int64, string, error) {
+	// Check for :label syntax first
+	colonIndex := strings.LastIndex(input, ":")
+	if colonIndex != -1 {
+		name := input[:colonIndex]
+		label := input[colonIndex+1:]
+
+		if label == "" {
+			return "", 0, "", fmt.Errorf("label cannot be empty")
+		}
+
+		return name, 0, label, nil
+	}
+
+	// Check for @version syntax
 	atIndex := strings.LastIndex(input, "@")
 	if atIndex == -1 {
-		return input, 0, nil
+		return input, 0, "", nil
 	}
 
 	name := input[:atIndex]
@@ -146,20 +180,20 @@ func parseNameAndVersion(input string) (string, int64, error) {
 
 	// Handle @latest
 	if strings.EqualFold(versionStr, "latest") {
-		return name, 0, nil
+		return name, 0, "", nil
 	}
 
 	// Parse version number
 	version, err := strconv.ParseInt(versionStr, 10, 64)
 	if err != nil {
-		return "", 0, fmt.Errorf("invalid version number: %s", versionStr)
+		return "", 0, "", fmt.Errorf("invalid version number: %s", versionStr)
 	}
 
 	if version < 1 {
-		return "", 0, fmt.Errorf("version must be a positive number")
+		return "", 0, "", fmt.Errorf("version must be a positive number")
 	}
 
-	return name, version, nil
+	return name, version, "", nil
 }
 
 // outputParameter outputs the parameter in the requested format

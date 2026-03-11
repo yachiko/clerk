@@ -58,9 +58,9 @@ AWS Systems Manager Parameter Store supports **labels** on parameter versions. L
 
 1. **Display Labels in Version History**: Show labels as colored badges next to each version.
 
-2. **Keyboard Shortcuts**:
-   - `l` - Add label to currently selected version
-   - `L` (Shift+l) - Remove label from version (with selection if multiple)
+3. **Keyboard Shortcuts**:
+   - `a` - Add label to currently selected version
+   - `r` - Remove label from version (with selection if multiple)
    - `m` - Move existing label to current version (shows label picker)
 
 3. **Visual Feedback**:
@@ -111,7 +111,7 @@ This keeps the version column at a predictable width (~45-50 chars) while still 
 │   v2  2023-12-20 16:45                       │ MySecretPassword123!                 │
 │   v1  2023-12-15 10:30                       │                                      │
 ├──────────────────────────────────────────────┴──────────────────────────────────────┤
-│ l:add label  L:remove label  M:move label  tab/shift+tab:version  esc:back         │
+│ a:add label  r:remove label  m:move label  tab/shift+tab:version  g:latest  esc:back│
 └─────────────────────────────────────────────────────────────────────────────────────┘
 
 Legend:
@@ -384,7 +384,7 @@ func (m Model) handleDescribeKeys(msg tea.KeyMsg) (Model, tea.Cmd) {
 	switch msg.String() {
 	// ... existing cases ...
 
-	case "l":
+	case "a":
 		// Add label to current version
 		if len(m.state.DescribeHistory) > 0 {
 			m.state.LabelInputActive = true
@@ -396,7 +396,7 @@ func (m Model) handleDescribeKeys(msg tea.KeyMsg) (Model, tea.Cmd) {
 		}
 		return m, nil
 
-	case "L":
+	case "r":
 		// Remove label from current version
 		if len(m.state.DescribeHistory) > 0 {
 			entry := m.state.DescribeHistory[m.state.HistoryIndex]
@@ -413,7 +413,7 @@ func (m Model) handleDescribeKeys(msg tea.KeyMsg) (Model, tea.Cmd) {
 		}
 		return m, nil
 
-	case "M":
+	case "m":
 		// Move label to current version
 		if len(m.state.DescribeHistory) > 0 {
 			// Collect all labels from all versions
@@ -907,7 +907,7 @@ func (m Model) renderDescribeView() string {
 
 // Update help line in describe view to show label shortcuts
 func (m Model) renderDescribeHelp() string {
-	return helpStyle.Render("c:copy  e:edit  l:add label  L:remove label  M:move label  ←→:scroll  esc:back")
+	return helpStyle.Render("c:copy  e:edit  a:add label  r:remove label  m:move label  g:latest  ←→:scroll  esc:back")
 }
 ```
 
@@ -985,9 +985,9 @@ func runGet(cmd *cobra.Command, args []string) error {
 - [ ] Version history shows max 2 labels inline, with `+N` indicator for overflow
 - [ ] Long labels (>12 chars) are truncated with `…` in version column
 - [ ] Value panel shows ALL labels for selected version (full, not truncated)
-- [ ] `l` key opens label input for adding a label to selected version
-- [ ] `L` (Shift+l) key opens label removal dialog with version's labels
-- [ ] `M` key opens move label dialog showing all labels across versions
+- [ ] `a` key opens label input for adding a label to selected version
+- [ ] `r` key opens label removal dialog with version's labels
+- [ ] `m` key opens move label dialog showing all labels across versions
 - [ ] Real-time validation shows errors for invalid label input
 - [ ] Suggestions appear and can be navigated with Tab/arrows
 - [ ] Label operations update the display after completion
@@ -1000,7 +1000,7 @@ func runGet(cmd *cobra.Command, args []string) error {
 ```bash
 # In describe view:
 # 1. Navigate to a version with Tab/Shift+Tab
-# 2. Press 'l' to add a label
+# 2. Press 'a' to add a label
 # 3. Type "prod" or select from suggestions
 # 4. Press Enter to apply
 

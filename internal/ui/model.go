@@ -199,6 +199,18 @@ type copyCompleteMsg struct {
 	err    error
 }
 
+// Label operation messages
+type labelCompleteMsg struct {
+	action  string
+	label   string
+	version int64
+	err     error
+}
+
+type historyRefreshMsg struct {
+	history []aws.ParameterHistory
+}
+
 // Update implements tea.Model
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmds []tea.Cmd
@@ -509,6 +521,27 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return statusMsg(fmt.Sprintf("Copied %s to %s", msg.source, msg.target))
 			},
 		)
+
+	case labelCompleteMsg:
+		if msg.err != nil {
+			m.state.ErrorMessage = fmt.Sprintf("Label %s failed: %v", msg.action, msg.err)
+			return m, tea.Tick(3*time.Second, func(t time.Time) tea.Msg {
+				return clearStatusMsg{}
+			})
+		}
+
+		// Refresh history to show updated labels
+		m.state.StatusMessage = fmt.Sprintf("Label '%s' %sed on v%d", msg.label, msg.action, msg.version)
+
+		// Trigger history refresh
+		return m, m.refreshHistory()
+
+	case historyRefreshMsg:
+		// Convert history and update state
+		m.state.DescribeHistory = convertHistory(msg.history)
+		return m, tea.Tick(2*time.Second, func(t time.Time) tea.Msg {
+			return clearStatusMsg{}
+		})
 	}
 
 	return m, tea.Batch(cmds...)
@@ -755,6 +788,11 @@ func (m *Model) getSelectedEntry() *cache.CacheEntry {
 
 // handleDescribeKeys handles keys in describe view
 func (m Model) handleDescribeKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	// Handle label input mode first
+	if m.state.LabelInputActive {
+		return m.handleLabelInput(msg)
+	}
+
 	switch msg.String() {
 	case "esc", "q":
 		m.state.Mode = m.state.PreviousMode
@@ -844,12 +882,53 @@ func (m Model) handleDescribeKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
-	case "l":
-		// Jump to latest version
-		if m.state.HistoryIndex != 0 {
-			m.state.HistoryIndex = 0
-			// Update value and trigger lazy load if needed
-			return m.updateSelectedVersion()
+	case "a":
+		// Add label to current version
+		if len(m.state.DescribeHistory) > 0 {
+			m.state.LabelInputActive = true
+			m.state.LabelAction = "add"
+			m.state.LabelInput = ""
+			m.state.LabelError = ""
+			m.state.LabelSuggestions = util.SuggestLabels()
+			m.state.LabelSuggestionIndex = -1
+		}
+		return m, nil
+
+	case "r":
+		// Remove label from current version
+		if len(m.state.DescribeHistory) > 0 {
+			entry := m.state.DescribeHistory[m.state.HistoryIndex]
+			if len(entry.Labels) > 0 {
+				m.state.LabelInputActive = true
+				m.state.LabelAction = "remove"
+				m.state.LabelInput = ""
+				m.state.LabelError = ""
+				m.state.LabelSuggestions = entry.Labels // Show only labels on this version
+				m.state.LabelSuggestionIndex = 0        // Pre-select first
+			} else {
+				m.state.ErrorMessage = "No labels on this version"
+			}
+		}
+		return m, nil
+
+	case "m":
+		// Move label to current version
+		if len(m.state.DescribeHistory) > 0 {
+			// Collect all labels from all versions
+			var allLabels []string
+			for _, h := range m.state.DescribeHistory {
+				allLabels = append(allLabels, h.Labels...)
+			}
+			if len(allLabels) > 0 {
+				m.state.LabelInputActive = true
+				m.state.LabelAction = "move"
+				m.state.LabelInput = ""
+				m.state.LabelError = ""
+				m.state.LabelSuggestions = allLabels
+				m.state.LabelSuggestionIndex = 0
+			} else {
+				m.state.ErrorMessage = "No labels to move"
+			}
 		}
 		return m, nil
 
@@ -1173,6 +1252,7 @@ func (m Model) loadDescribe(name string) tea.Cmd {
 					Value:       h.Value,
 					Modified:    h.LastModifiedDate.Format(time.RFC3339),
 					ValueLoaded: true,
+					Labels:      h.Labels,
 				})
 			}
 		} else {
@@ -1193,6 +1273,7 @@ func (m Model) loadDescribe(name string) tea.Cmd {
 					Value:       h.Value,
 					Modified:    h.LastModifiedDate.Format(time.RFC3339),
 					ValueLoaded: true,
+					Labels:      h.Labels,
 				})
 			}
 		}
@@ -1482,6 +1563,204 @@ func (m Model) loadVersionValues(paramName string, versions []int64) tea.Cmd {
 
 		return versionValuesLoadedMsg{versions: versionMap}
 	}
+}
+
+// handleLabelInput handles input during label operations
+func (m Model) handleLabelInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc":
+		// Cancel label input
+		m.state.LabelInputActive = false
+		m.state.LabelInput = ""
+		m.state.LabelError = ""
+		return m, nil
+
+	case "enter":
+		// Submit label
+		label := m.state.LabelInput
+		if m.state.LabelSuggestionIndex >= 0 && m.state.LabelSuggestionIndex < len(m.state.LabelSuggestions) {
+			label = m.state.LabelSuggestions[m.state.LabelSuggestionIndex]
+		}
+
+		if label == "" {
+			m.state.LabelError = "Label cannot be empty"
+			return m, nil
+		}
+
+		// Validate for add action
+		if m.state.LabelAction == "add" {
+			if err := util.ValidateLabel(label); err != nil {
+				m.state.LabelError = err.Error()
+				return m, nil
+			}
+		}
+
+		m.state.LabelInputActive = false
+		entry := m.state.DescribeHistory[m.state.HistoryIndex]
+
+		return m, m.executeLabelAction(m.state.LabelAction, label, entry.Version)
+
+	case "tab", "down":
+		// Next suggestion
+		if len(m.state.LabelSuggestions) > 0 {
+			m.state.LabelSuggestionIndex = (m.state.LabelSuggestionIndex + 1) % len(m.state.LabelSuggestions)
+		}
+		return m, nil
+
+	case "shift+tab", "up":
+		// Previous suggestion
+		if len(m.state.LabelSuggestions) > 0 {
+			m.state.LabelSuggestionIndex--
+			if m.state.LabelSuggestionIndex < 0 {
+				m.state.LabelSuggestionIndex = len(m.state.LabelSuggestions) - 1
+			}
+		}
+		return m, nil
+
+	case "backspace":
+		if len(m.state.LabelInput) > 0 {
+			m.state.LabelInput = m.state.LabelInput[:len(m.state.LabelInput)-1]
+			m.state.LabelSuggestionIndex = -1
+			m.updateLabelSuggestions()
+		}
+		return m, nil
+
+	default:
+		// Add character to input
+		if len(msg.String()) == 1 {
+			m.state.LabelInput += msg.String()
+			m.state.LabelSuggestionIndex = -1
+			m.updateLabelSuggestions()
+
+			// Real-time validation for add
+			if m.state.LabelAction == "add" {
+				if err := util.ValidateLabel(m.state.LabelInput); err != nil {
+					m.state.LabelError = err.Error()
+				} else {
+					m.state.LabelError = ""
+				}
+			}
+		}
+		return m, nil
+	}
+}
+
+// updateLabelSuggestions filters suggestions based on current input
+func (m *Model) updateLabelSuggestions() {
+	if m.state.LabelInput == "" {
+		if m.state.LabelAction == "add" {
+			m.state.LabelSuggestions = util.SuggestLabels()
+		}
+		return
+	}
+
+	var filtered []string
+	input := strings.ToLower(m.state.LabelInput)
+
+	var source []string
+	if m.state.LabelAction == "add" {
+		source = util.SuggestLabels()
+	} else {
+		// For remove/move, use labels from history
+		for _, h := range m.state.DescribeHistory {
+			source = append(source, h.Labels...)
+		}
+	}
+
+	for _, s := range source {
+		if strings.Contains(strings.ToLower(s), input) {
+			filtered = append(filtered, s)
+		}
+	}
+	m.state.LabelSuggestions = filtered
+}
+
+// executeLabelAction performs the label operation
+func (m Model) executeLabelAction(action, label string, version int64) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+
+		paramName := m.state.DescribeParamName
+
+		switch action {
+		case "add":
+			input := &aws.LabelParameterInput{
+				Name:    paramName,
+				Version: version,
+				Labels:  []string{label},
+			}
+			output, err := m.client.LabelParameterVersion(ctx, input)
+			if err != nil {
+				return labelCompleteMsg{action: action, err: err}
+			}
+			if len(output.InvalidLabels) > 0 {
+				return labelCompleteMsg{
+					action: action,
+					err:    fmt.Errorf("invalid labels: %v", output.InvalidLabels),
+				}
+			}
+			return labelCompleteMsg{action: action, label: label, version: version}
+
+		case "remove":
+			input := &aws.UnlabelParameterInput{
+				Name:    paramName,
+				Version: version,
+				Labels:  []string{label},
+			}
+			err := m.client.UnlabelParameterVersion(ctx, input)
+			if err != nil {
+				return labelCompleteMsg{action: action, err: err}
+			}
+			return labelCompleteMsg{action: action, label: label, version: version}
+
+		case "move":
+			// Moving a label is just adding it to the new version
+			// AWS automatically removes it from the old version
+			input := &aws.LabelParameterInput{
+				Name:    paramName,
+				Version: version,
+				Labels:  []string{label},
+			}
+			_, err := m.client.LabelParameterVersion(ctx, input)
+			if err != nil {
+				return labelCompleteMsg{action: action, err: err}
+			}
+			return labelCompleteMsg{action: action, label: label, version: version}
+		}
+
+		return labelCompleteMsg{action: action, err: fmt.Errorf("unknown action: %s", action)}
+	}
+}
+
+// refreshHistory refreshes the parameter history to show updated labels
+func (m Model) refreshHistory() tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+
+		history, err := m.client.GetParameterHistory(ctx, m.state.DescribeParamName, 50, false)
+		if err != nil {
+			return errorMsg(fmt.Sprintf("Failed to refresh history: %v", err))
+		}
+
+		return historyRefreshMsg{history: history}
+	}
+}
+
+// convertHistory converts AWS history to UI history entries
+func convertHistory(awsHistory []aws.ParameterHistory) []HistoryEntry {
+	var entries []HistoryEntry
+	for _, h := range awsHistory {
+		entries = append(entries, HistoryEntry{
+			Version:     h.Version,
+			Value:       h.Value,
+			Modified:    h.LastModifiedDate.Format("2006-01-02 15:04"),
+			ValueLoaded: h.Value != "", // Value is loaded if not empty
+			Labels:      h.Labels,
+		})
+	}
+	return entries
 }
 
 // View implements tea.Model

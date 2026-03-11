@@ -83,6 +83,37 @@ var (
 			BorderForeground(lipgloss.Color("196")).
 			Padding(1, 2).
 			Width(50)
+
+	labelBadgeStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("0")).
+			Background(lipgloss.Color("214")).
+			Padding(0, 1).
+			Bold(true)
+
+	labelBadgeProdStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("0")).
+				Background(lipgloss.Color("42")).
+				Padding(0, 1).
+				Bold(true)
+
+	labelBadgeStagingStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("0")).
+				Background(lipgloss.Color("214")).
+				Padding(0, 1).
+				Bold(true)
+
+	labelBadgeDevStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("0")).
+				Background(lipgloss.Color("33")).
+				Padding(0, 1).
+				Bold(true)
+)
+
+const (
+	// MaxInlineLabels is the maximum number of labels to show inline in version history
+	MaxInlineLabels = 2
+	// MaxLabelBadgeWidth is the maximum width for a label badge before truncation
+	MaxLabelBadgeWidth = 12
 )
 
 // renderBrowseView renders the main browse view
@@ -415,10 +446,18 @@ func (m Model) renderDescribeView() string {
 	output = append(output, statusLine)
 
 	// Help (matching browse view structure - same formatting as browse)
-	help := "x:mask  c:copy  e:edit  tab/⇧tab:version  l:latest  ↑↓:scroll  ←→:horiz  w:wrap  esc:back  q:quit"
+	help := m.renderDescribeHelp()
 	output = append(output, helpStyle.Render("  "+help+"  "))
 
-	return strings.Join(output, "\n")
+	view := strings.Join(output, "\n")
+
+	// Overlay label input dialog if active
+	if m.state.LabelInputActive {
+		dialog := renderLabelInput(m)
+		return centerDialog(dialog, m.state.Width, m.state.Height)
+	}
+
+	return view
 }
 
 // renderVersionHistoryPanel renders the version history panel
@@ -448,10 +487,19 @@ func (m Model) renderVersionHistoryPanel(width, height int) string {
 		for i := start; i < end; i++ {
 			h := m.state.DescribeHistory[i]
 			versionStr := fmt.Sprintf("v%d - %s", h.Version, h.Modified)
+
+			// Add label badges if present
+			labelBadges := ""
+			if len(h.Labels) > 0 {
+				labelBadges = " " + renderInlineBadges(h.Labels)
+			}
+
+			displayStr := versionStr + labelBadges
+
 			if i == m.state.HistoryIndex {
-				lines = append(lines, selectedStyle.Render("▸ "+versionStr))
+				lines = append(lines, selectedStyle.Render("▸ "+displayStr))
 			} else {
-				lines = append(lines, normalStyle.Render("  "+versionStr))
+				lines = append(lines, normalStyle.Render("  "+displayStr))
 			}
 		}
 	}
@@ -490,6 +538,16 @@ func (m Model) renderValuePanel(width, height int) string {
 		header += " " + dimStyle.Render("(masked)")
 	}
 	lines = append(lines, header)
+
+	// Show labels for current version if available
+	if len(m.state.DescribeHistory) > 0 && m.state.HistoryIndex < len(m.state.DescribeHistory) {
+		currentLabels := m.state.DescribeHistory[m.state.HistoryIndex].Labels
+		if len(currentLabels) > 0 {
+			labelLine := renderFullLabels(currentLabels)
+			lines = append(lines, labelLine)
+		}
+	}
+
 	lines = append(lines, "")
 
 	if m.state.DescribeValue == "" {
@@ -758,4 +816,147 @@ func formatDuration(d time.Duration) string {
 		return fmt.Sprintf("%dh", int(d.Hours()))
 	}
 	return fmt.Sprintf("%dd", int(d.Hours()/24))
+}
+
+// styleLabelBadge returns a consistent style for a label badge based on label name hash
+// Same label will always have the same color across all parameters
+func styleLabelBadge(label string) lipgloss.Style {
+	// Color palette for labels (distinct, readable colors)
+	colors := []struct {
+		bg string
+		fg string
+	}{
+		{"34", "230"},  // green
+		{"214", "0"},   // orange
+		{"33", "230"},  // blue
+		{"198", "230"}, // pink
+		{"226", "0"},   // yellow
+		{"51", "0"},    // cyan
+		{"141", "230"}, // purple
+		{"208", "0"},   // dark orange
+	}
+
+	// Simple hash function for consistent color selection
+	hash := 0
+	for _, c := range label {
+		hash = hash*31 + int(c)
+	}
+	if hash < 0 {
+		hash = -hash
+	}
+	colorIdx := hash % len(colors)
+
+	return lipgloss.NewStyle().
+		Foreground(lipgloss.Color(colors[colorIdx].fg)).
+		Background(lipgloss.Color(colors[colorIdx].bg)).
+		Padding(0, 1).
+		Bold(true)
+}
+
+// renderInlineBadges renders labels as compact badges for version history (max 2, truncated)
+func renderInlineBadges(labels []string) string {
+	if len(labels) == 0 {
+		return ""
+	}
+
+	var badges []string
+	count := len(labels)
+	if count > MaxInlineLabels {
+		count = MaxInlineLabels
+	}
+
+	for i := 0; i < count; i++ {
+		label := labels[i]
+		if len(label) > MaxLabelBadgeWidth {
+			label = label[:MaxLabelBadgeWidth-1] + "…"
+		}
+		badge := styleLabelBadge(labels[i]).Render(label)
+		badges = append(badges, badge)
+	}
+
+	result := strings.Join(badges, " ")
+	if len(labels) > MaxInlineLabels {
+		overflow := fmt.Sprintf(" +%d", len(labels)-MaxInlineLabels)
+		result += dimStyle.Render(overflow)
+	}
+
+	return result
+}
+
+// renderFullLabels renders all labels as badges for the value panel header
+func renderFullLabels(labels []string) string {
+	if len(labels) == 0 {
+		return ""
+	}
+
+	var badges []string
+	for _, label := range labels {
+		badge := styleLabelBadge(label).Render(label)
+		badges = append(badges, badge)
+	}
+
+	return strings.Join(badges, " ")
+}
+
+// renderLabelInput renders the label input dialog
+func renderLabelInput(m Model) string {
+	var b strings.Builder
+
+	// Title based on action
+	var title string
+	switch m.state.LabelAction {
+	case "add":
+		title = "ADD LABEL"
+	case "remove":
+		title = "REMOVE LABEL"
+	case "move":
+		title = "MOVE LABEL"
+	default:
+		title = "LABEL ACTION"
+	}
+	b.WriteString(labelStyle.Render(title))
+	b.WriteString("\n\n")
+
+	// Version context
+	if len(m.state.DescribeHistory) > 0 && m.state.HistoryIndex < len(m.state.DescribeHistory) {
+		currentVersion := m.state.DescribeHistory[m.state.HistoryIndex].Version
+		b.WriteString(fmt.Sprintf("Version: %d\n", currentVersion))
+		b.WriteString(fmt.Sprintf("Parameter: %s\n\n", m.state.DescribeEntry.Name))
+	}
+
+	// Input field
+	b.WriteString(promptStyle.Render("Label: "))
+	b.WriteString(inputStyle.Render(m.state.LabelInput))
+	b.WriteString("█") // cursor
+	b.WriteString("\n\n")
+
+	// Suggestions
+	if len(m.state.LabelSuggestions) > 0 {
+		b.WriteString(dimStyle.Render("Suggestions (Tab to cycle):\n"))
+		for i, suggestion := range m.state.LabelSuggestions {
+			if i == m.state.LabelSuggestionIndex {
+				b.WriteString(selectedStyle.Render("▸ " + suggestion))
+			} else {
+				b.WriteString(dimStyle.Render("  " + suggestion))
+			}
+			b.WriteString("\n")
+		}
+		b.WriteString("\n")
+	}
+
+	// Error message
+	if m.state.LabelError != "" {
+		b.WriteString(errorStyle.Render(m.state.LabelError))
+		b.WriteString("\n\n")
+	}
+
+	// Help text
+	b.WriteString(dimStyle.Render("Enter:submit  Tab:next  Esc:cancel"))
+
+	return dialogStyle.Render(b.String())
+}
+
+// renderDescribeHelp returns the help text for describe view
+func (m Model) renderDescribeHelp() string {
+	return "x:mask  c:copy  e:edit  tab/⇧tab:version  g:latest  a:add-label  r:remove-label  m:move-label  ↑↓:scroll  ←→:horiz  w:wrap  esc:back  q:quit"
 }

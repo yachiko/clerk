@@ -47,3 +47,23 @@ type PutParameterInput struct {
 type PutParameterOutput struct {
 	Version int64
 }
+
+// LabelParameterInput represents input for labeling a parameter version
+type LabelParameterInput struct {
+	Name    string
+	Version int64
+	Labels  []string
+}
+
+// LabelParameterOutput represents output from label operation
+type LabelParameterOutput struct {
+	InvalidLabels []string // Labels that couldn't be applied
+	Version       int64
+}
+
+// UnlabelParameterInput represents input for removing labels
+type UnlabelParameterInput struct {
+	Name    string
+	Version int64
+	Labels  []string
+}
