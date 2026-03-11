@@ -65,6 +65,14 @@ type State struct {
 	// Confirmation dialog
 	Confirm ConfirmState
 
+	// Label management state
+	LabelInput           string   // Current label input text
+	LabelInputActive     bool     // Whether label input is active
+	LabelAction          string   // "add", "remove", "move"
+	LabelError           string   // Validation error for label input
+	LabelSuggestions     []string // Suggested labels for autocomplete
+	LabelSuggestionIndex int      // Currently selected suggestion
+
 	// Window dimensions
 	Width  int
 	Height int
@@ -83,7 +91,8 @@ type HistoryEntry struct {
 	Version     int64
 	Value       string
 	Modified    string
-	ValueLoaded bool // Whether the value has been fetched
+	ValueLoaded bool     // Whether the value has been fetched
+	Labels      []string // Labels attached to this version
 }
 
 // TreeNode represents a node in the tree view

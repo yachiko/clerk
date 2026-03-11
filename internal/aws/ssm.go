@@ -393,3 +393,81 @@ func (c *Client) GetRegion() string {
 func (c *Client) GetAccountID() string {
 	return c.accountID
 }
+
+// LabelParameterVersion adds or moves labels to a parameter version
+// If a label already exists on another version, it will be moved
+func (c *Client) LabelParameterVersion(ctx context.Context, input *LabelParameterInput) (*LabelParameterOutput, error) {
+	ssmInput := &ssm.LabelParameterVersionInput{
+		Name:             aws.String(input.Name),
+		ParameterVersion: aws.Int64(input.Version),
+		Labels:           input.Labels,
+	}
+
+	output, err := c.ssm.LabelParameterVersion(ctx, ssmInput)
+	if err != nil {
+		return nil, fmt.Errorf("failed to label parameter version: %w", err)
+	}
+
+	return &LabelParameterOutput{
+		InvalidLabels: output.InvalidLabels,
+		Version:       input.Version,
+	}, nil
+}
+
+// UnlabelParameterVersion removes labels from a parameter version
+func (c *Client) UnlabelParameterVersion(ctx context.Context, input *UnlabelParameterInput) error {
+	ssmInput := &ssm.UnlabelParameterVersionInput{
+		Name:             aws.String(input.Name),
+		ParameterVersion: aws.Int64(input.Version),
+		Labels:           input.Labels,
+	}
+
+	_, err := c.ssm.UnlabelParameterVersion(ctx, ssmInput)
+	if err != nil {
+		return fmt.Errorf("failed to unlabel parameter version: %w", err)
+	}
+
+	return nil
+}
+
+// GetParameterByLabel retrieves a parameter version by label
+func (c *Client) GetParameterByLabel(ctx context.Context, name, label string, withDecryption bool) (*Parameter, error) {
+	labeledName := fmt.Sprintf("%s:%s", name, label)
+	input := &ssm.GetParameterInput{
+		Name:           aws.String(labeledName),
+		WithDecryption: aws.Bool(withDecryption),
+	}
+
+	output, err := c.ssm.GetParameter(ctx, input)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get parameter by label: %w", err)
+	}
+
+	p := output.Parameter
+	return &Parameter{
+		Name:             aws.ToString(p.Name),
+		Value:            aws.ToString(p.Value),
+		Type:             string(p.Type),
+		Version:          p.Version,
+		LastModifiedDate: aws.ToTime(p.LastModifiedDate),
+		ARN:              aws.ToString(p.ARN),
+	}, nil
+}
+
+// FindLabelVersion finds which version has a specific label
+func (c *Client) FindLabelVersion(ctx context.Context, name, label string) (int64, error) {
+	history, err := c.GetParameterHistory(ctx, name, 50, false)
+	if err != nil {
+		return 0, err
+	}
+
+	for _, h := range history {
+		for _, l := range h.Labels {
+			if l == label {
+				return h.Version, nil
+			}
+		}
+	}
+
+	return 0, fmt.Errorf("label %q not found on any version", label)
+}
