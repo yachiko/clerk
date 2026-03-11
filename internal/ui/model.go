@@ -537,8 +537,66 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.refreshHistory()
 
 	case historyRefreshMsg:
-		// Convert history and update state
-		m.state.DescribeHistory = convertHistory(msg.history)
+		// Save the version the user was viewing before refresh
+		var previousVersion int64
+		if m.state.HistoryIndex >= 0 && m.state.HistoryIndex < len(m.state.DescribeHistory) {
+			previousVersion = m.state.DescribeHistory[m.state.HistoryIndex].Version
+		}
+
+		// Preserve previously loaded (decrypted) values
+		oldValues := make(map[int64]HistoryEntry, len(m.state.DescribeHistory))
+		for _, h := range m.state.DescribeHistory {
+			if h.ValueLoaded {
+				oldValues[h.Version] = h
+			}
+		}
+
+		newHistory := convertHistory(msg.history)
+
+		// Reverse to show newest first (matching loadDescribe behavior)
+		for i, j := 0, len(newHistory)-1; i < j; i, j = i+1, j-1 {
+			newHistory[i], newHistory[j] = newHistory[j], newHistory[i]
+		}
+
+		// Merge old decrypted values into new history
+		for i := range newHistory {
+			if old, ok := oldValues[newHistory[i].Version]; ok {
+				newHistory[i].Value = old.Value
+				newHistory[i].ValueLoaded = old.ValueLoaded
+			}
+		}
+
+		m.state.DescribeHistory = newHistory
+
+		// Preserve the user's selected version position
+		if len(newHistory) > 0 {
+			found := false
+			for i, h := range newHistory {
+				if h.Version == previousVersion {
+					m.state.HistoryIndex = i
+					found = true
+					break
+				}
+			}
+			if !found && m.state.HistoryIndex >= len(newHistory) {
+				m.state.HistoryIndex = len(newHistory) - 1
+			}
+		} else {
+			m.state.HistoryIndex = 0
+		}
+
+		// Adjust scroll offset to keep selection visible
+		if m.state.HistoryIndex < m.state.HistoryScrollOffset {
+			m.state.HistoryScrollOffset = m.state.HistoryIndex
+		}
+
+		// Update displayed value to match current selection
+		if m.state.HistoryIndex >= 0 && m.state.HistoryIndex < len(m.state.DescribeHistory) {
+			if m.state.DescribeHistory[m.state.HistoryIndex].ValueLoaded {
+				m.state.DescribeValue = m.state.DescribeHistory[m.state.HistoryIndex].Value
+			}
+		}
+
 		return m, tea.Tick(2*time.Second, func(t time.Time) tea.Msg {
 			return clearStatusMsg{}
 		})
@@ -896,7 +954,7 @@ func (m Model) handleDescribeKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case "r":
 		// Remove label from current version
-		if len(m.state.DescribeHistory) > 0 {
+		if len(m.state.DescribeHistory) > 0 && m.state.HistoryIndex < len(m.state.DescribeHistory) {
 			entry := m.state.DescribeHistory[m.state.HistoryIndex]
 			if len(entry.Labels) > 0 {
 				m.state.LabelInputActive = true
@@ -914,10 +972,16 @@ func (m Model) handleDescribeKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "m":
 		// Move label to current version
 		if len(m.state.DescribeHistory) > 0 {
-			// Collect all labels from all versions
+			// Collect all unique labels from all versions
+			seen := make(map[string]bool)
 			var allLabels []string
 			for _, h := range m.state.DescribeHistory {
-				allLabels = append(allLabels, h.Labels...)
+				for _, l := range h.Labels {
+					if !seen[l] {
+						allLabels = append(allLabels, l)
+						seen[l] = true
+					}
+				}
 			}
 			if len(allLabels) > 0 {
 				m.state.LabelInputActive = true
@@ -1595,6 +1659,12 @@ func (m Model) handleLabelInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 		}
 
+		// Bounds check before accessing history
+		if m.state.HistoryIndex < 0 || m.state.HistoryIndex >= len(m.state.DescribeHistory) {
+			m.state.LabelError = "No version selected"
+			return m, nil
+		}
+
 		m.state.LabelInputActive = false
 		entry := m.state.DescribeHistory[m.state.HistoryIndex]
 
@@ -1661,9 +1731,15 @@ func (m *Model) updateLabelSuggestions() {
 	if m.state.LabelAction == "add" {
 		source = util.SuggestLabels()
 	} else {
-		// For remove/move, use labels from history
+		// For remove/move, use unique labels from history
+		seen := make(map[string]bool)
 		for _, h := range m.state.DescribeHistory {
-			source = append(source, h.Labels...)
+			for _, l := range h.Labels {
+				if !seen[l] {
+					source = append(source, l)
+					seen[l] = true
+				}
+			}
 		}
 	}
 
@@ -1682,6 +1758,9 @@ func (m Model) executeLabelAction(action, label string, version int64) tea.Cmd {
 		defer cancel()
 
 		paramName := m.state.DescribeParamName
+		if paramName == "" {
+			return labelCompleteMsg{action: action, err: fmt.Errorf("no parameter selected")}
+		}
 
 		switch action {
 		case "add":

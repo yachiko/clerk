@@ -84,29 +84,6 @@ var (
 			Padding(1, 2).
 			Width(50)
 
-	labelBadgeStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("0")).
-			Background(lipgloss.Color("214")).
-			Padding(0, 1).
-			Bold(true)
-
-	labelBadgeProdStyle = lipgloss.NewStyle().
-				Foreground(lipgloss.Color("0")).
-				Background(lipgloss.Color("42")).
-				Padding(0, 1).
-				Bold(true)
-
-	labelBadgeStagingStyle = lipgloss.NewStyle().
-				Foreground(lipgloss.Color("0")).
-				Background(lipgloss.Color("214")).
-				Padding(0, 1).
-				Bold(true)
-
-	labelBadgeDevStyle = lipgloss.NewStyle().
-				Foreground(lipgloss.Color("0")).
-				Background(lipgloss.Color("33")).
-				Padding(0, 1).
-				Bold(true)
 )
 
 const (
