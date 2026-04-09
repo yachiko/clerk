@@ -208,6 +208,16 @@ type labelCompleteMsg struct {
 	err     error
 }
 
+type tagCompleteMsg struct {
+	action string
+	key    string
+	err    error
+}
+
+type tagsRefreshMsg struct {
+	tags map[string]string
+}
+
 type historyRefreshMsg struct {
 	history []aws.ParameterHistory
 }
@@ -536,6 +546,29 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		// Trigger history refresh
 		return m, m.refreshHistory()
+
+	case tagCompleteMsg:
+		if msg.err != nil {
+			m.state.ErrorMessage = fmt.Sprintf("Tag %s failed: %v", msg.action, msg.err)
+			return m, tea.Tick(3*time.Second, func(t time.Time) tea.Msg {
+				return clearStatusMsg{}
+			})
+		}
+
+		// Refresh tags on the entry
+		m.state.StatusMessage = fmt.Sprintf("Tag '%s' %sed", msg.key, msg.action)
+		return m, tea.Batch(
+			m.refreshTags(),
+			tea.Tick(3*time.Second, func(t time.Time) tea.Msg {
+				return clearStatusMsg{}
+			}),
+		)
+
+	case tagsRefreshMsg:
+		if m.state.DescribeEntry != nil {
+			m.state.DescribeEntry.Tags = msg.tags
+		}
+		return m, nil
 
 	case historyRefreshMsg:
 		// Save the version the user was viewing before refresh
@@ -875,6 +908,10 @@ func (m Model) handleDescribeKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if m.state.LabelInputActive {
 		return m.handleLabelInput(msg)
 	}
+	// Handle tag input mode
+	if m.state.TagInputActive {
+		return m.handleTagInput(msg)
+	}
 
 	switch msg.String() {
 	case "esc", "q":
@@ -1025,6 +1062,36 @@ func (m Model) handleDescribeKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			} else {
 				m.state.ErrorMessage = "No labels to move"
 			}
+		}
+		return m, nil
+
+	case "T":
+		// Add tag to parameter
+		if m.state.DescribeEntry != nil {
+			m.state.TagInputActive = true
+			m.state.TagAction = "add"
+			m.state.TagInput = ""
+			m.state.TagError = ""
+			m.state.TagSuggestions = nil
+			m.state.TagSuggestionIndex = -1
+		}
+		return m, nil
+
+	case "D":
+		// Remove tag from parameter
+		if m.state.DescribeEntry != nil && len(m.state.DescribeEntry.Tags) > 0 {
+			var keys []string
+			for k := range m.state.DescribeEntry.Tags {
+				keys = append(keys, k)
+			}
+			m.state.TagInputActive = true
+			m.state.TagAction = "remove"
+			m.state.TagInput = ""
+			m.state.TagError = ""
+			m.state.TagSuggestions = keys
+			m.state.TagSuggestionIndex = 0
+		} else {
+			m.state.ErrorMessage = "No tags on this parameter"
 		}
 		return m, nil
 
@@ -1860,6 +1927,112 @@ func (m Model) executeLabelAction(action, label string, version int64) tea.Cmd {
 		}
 
 		return labelCompleteMsg{action: action, err: fmt.Errorf("unknown action: %s", action)}
+	}
+}
+
+// handleTagInput handles input during tag operations
+func (m Model) handleTagInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc":
+		m.state.TagInputActive = false
+		m.state.TagInput = ""
+		m.state.TagError = ""
+		return m, nil
+
+	case "enter":
+		input := strings.TrimSpace(m.state.TagInput)
+		if input == "" {
+			m.state.TagError = "Input cannot be empty"
+			return m, nil
+		}
+
+		paramName := m.state.DescribeParamName
+		if paramName == "" {
+			m.state.TagError = "No parameter selected"
+			return m, nil
+		}
+
+		m.state.TagInputActive = false
+		m.state.TagInput = ""
+		m.state.TagError = ""
+
+		return m, m.executeTagAction(m.state.TagAction, input)
+
+	case "tab":
+		// Cycle through suggestions
+		if len(m.state.TagSuggestions) > 0 {
+			m.state.TagSuggestionIndex = (m.state.TagSuggestionIndex + 1) % len(m.state.TagSuggestions)
+			m.state.TagInput = m.state.TagSuggestions[m.state.TagSuggestionIndex]
+		}
+		return m, nil
+
+	case "backspace":
+		if len(m.state.TagInput) > 0 {
+			m.state.TagInput = m.state.TagInput[:len(m.state.TagInput)-1]
+		}
+		m.state.TagError = ""
+		return m, nil
+
+	default:
+		ch := msg.String()
+		if len(ch) == 1 {
+			m.state.TagInput += ch
+			m.state.TagError = ""
+		}
+		return m, nil
+	}
+}
+
+// executeTagAction performs the tag add/remove operation
+func (m Model) executeTagAction(action, input string) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+
+		paramName := m.state.DescribeParamName
+		if paramName == "" {
+			return tagCompleteMsg{action: action, err: fmt.Errorf("no parameter selected")}
+		}
+
+		switch action {
+		case "add":
+			// Parse key=value
+			parts := strings.SplitN(input, "=", 2)
+			if len(parts) != 2 || parts[0] == "" {
+				return tagCompleteMsg{action: action, err: fmt.Errorf("format must be key=value")}
+			}
+			key, value := strings.TrimSpace(parts[0]), strings.TrimSpace(parts[1])
+			err := m.client.AddTagsToResource(ctx, paramName, map[string]string{key: value})
+			if err != nil {
+				return tagCompleteMsg{action: action, err: err}
+			}
+			return tagCompleteMsg{action: "add", key: key}
+
+		case "remove":
+			key := strings.TrimSpace(input)
+			err := m.client.RemoveTagsFromResource(ctx, paramName, []string{key})
+			if err != nil {
+				return tagCompleteMsg{action: action, err: err}
+			}
+			return tagCompleteMsg{action: "remove", key: key}
+		}
+
+		return tagCompleteMsg{action: action, err: fmt.Errorf("unknown action: %s", action)}
+	}
+}
+
+// refreshTags refreshes tags for the current parameter
+func (m Model) refreshTags() tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		tags, err := m.client.GetParameterTags(ctx, m.state.DescribeParamName)
+		if err != nil {
+			return errorMsg(fmt.Sprintf("Failed to refresh tags: %v", err))
+		}
+
+		return tagsRefreshMsg{tags: tags}
 	}
 }
 

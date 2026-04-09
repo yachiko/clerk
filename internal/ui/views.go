@@ -546,6 +546,12 @@ func (m Model) renderDescribeView() string {
 		return centerDialog(dialog, m.state.Width, m.state.Height)
 	}
 
+	// Overlay tag input dialog if active
+	if m.state.TagInputActive {
+		dialog := renderTagInput(m)
+		return centerDialog(dialog, m.state.Width, m.state.Height)
+	}
+
 	return view
 }
 
@@ -1046,12 +1052,76 @@ func renderLabelInput(m Model) string {
 	return dialogStyle.Render(b.String())
 }
 
+// renderTagInput renders the tag input dialog
+func renderTagInput(m Model) string {
+	var b strings.Builder
+
+	var title string
+	switch m.state.TagAction {
+	case "add":
+		title = "ADD TAG"
+	case "remove":
+		title = "REMOVE TAG"
+	default:
+		title = "TAG ACTION"
+	}
+	b.WriteString(labelStyle.Render(title))
+	b.WriteString("\n\n")
+
+	// Parameter context
+	if m.state.DescribeEntry != nil {
+		b.WriteString(dimStyle.Render("Parameter: ") + nameColStyle.Render(m.state.DescribeEntry.Name) + "\n\n")
+	}
+
+	// Input field
+	if m.state.TagAction == "add" {
+		b.WriteString(promptStyle.Render("Tag (key=value): "))
+	} else {
+		b.WriteString(promptStyle.Render("Tag key: "))
+	}
+	b.WriteString(inputStyle.Render(m.state.TagInput))
+	b.WriteString("█")
+	b.WriteString("\n\n")
+
+	// Suggestions (for remove: existing tag keys)
+	if len(m.state.TagSuggestions) > 0 {
+		b.WriteString(dimStyle.Render("Existing tags (Tab to cycle):\n"))
+		for i, suggestion := range m.state.TagSuggestions {
+			display := suggestion
+			if m.state.TagAction == "remove" {
+				if val, ok := m.state.DescribeEntry.Tags[suggestion]; ok {
+					display = suggestion + "=" + val
+				}
+			}
+			if i == m.state.TagSuggestionIndex {
+				b.WriteString(selectedStyle.Render("▸ " + display))
+			} else {
+				b.WriteString(dimStyle.Render("  " + display))
+			}
+			b.WriteString("\n")
+		}
+		b.WriteString("\n")
+	}
+
+	// Error message
+	if m.state.TagError != "" {
+		b.WriteString(errorStyle.Render(m.state.TagError))
+		b.WriteString("\n\n")
+	}
+
+	// Help text
+	b.WriteString(renderHelp("Enter", "submit", "Tab", "next", "Esc", "cancel"))
+
+	return dialogStyle.Render(b.String())
+}
+
 // renderDescribeHelp returns the help text for describe view
 func (m Model) renderDescribeHelp() string {
 	return renderHelp(
 		"x", "mask", "c", "copy-val", "C", "copy-name", "e", "edit",
 		"tab/⇧tab", "version", "g", "latest",
 		"a", "add-label", "r", "remove-label", "m", "move-label",
+		"T", "add-tag", "D", "del-tag",
 		"↑↓", "scroll", "←→", "horiz", "w", "wrap",
 		"esc", "back", "q", "quit",
 	)

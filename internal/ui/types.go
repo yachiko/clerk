@@ -101,6 +101,14 @@ type State struct {
 	LabelSuggestions     []string // Suggested labels for autocomplete
 	LabelSuggestionIndex int      // Currently selected suggestion
 
+	// Tag management state
+	TagInputActive     bool     // Whether tag input dialog is active
+	TagAction          string   // "add", "remove"
+	TagInput           string   // Current tag input text (key=value for add, key for remove)
+	TagError           string   // Validation error for tag input
+	TagSuggestions     []string // Suggested tag keys for autocomplete
+	TagSuggestionIndex int      // Currently selected suggestion
+
 	// Window dimensions
 	Width  int
 	Height int
