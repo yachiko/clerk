@@ -97,6 +97,9 @@ var (
 	modifiedColStyle = lipgloss.NewStyle().
 				Foreground(lipgloss.Color("243")) // Dim gray
 
+	tagColStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("42")) // Green - tags stand out
+
 	separatorStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("240")) // Subtle gray for separators
 
@@ -203,30 +206,20 @@ func (m Model) renderBrowseView() string {
 
 	// Header - varies based on width
 	showModified := m.state.Width >= 100 // Show modified column if width >= 100
-	var nameWidth int
+	showTags := m.state.Width >= 110     // Show tags column if width >= 110
+	nameWidth := calcNameWidth(m.state.Width, showModified, showTags)
 
-	if showModified {
-		nameWidth = m.state.Width - 47 - 2
-		if nameWidth < 20 {
-			nameWidth = 20
-		}
-		header := "  " +
-			headerStyle.Render(fmt.Sprintf("%-*s", nameWidth, "NAME"+m.sortIndicator(SortByName))) + "   " +
-			headerStyle.Render(fmt.Sprintf("%-12s", "TYPE")) + "   " +
-			headerStyle.Render(fmt.Sprintf("%8s", "VERSION"+m.sortIndicator(SortByVersion))) + "   " +
-			headerStyle.Render(fmt.Sprintf("%16s", "MODIFIED"+m.sortIndicator(SortByModified))) + "  "
-		lines = append(lines, header)
-	} else {
-		nameWidth = m.state.Width - 26 - 2
-		if nameWidth < 20 {
-			nameWidth = 20
-		}
-		header := "  " +
-			headerStyle.Render(fmt.Sprintf("%-*s", nameWidth, "NAME"+m.sortIndicator(SortByName))) + "   " +
-			headerStyle.Render(fmt.Sprintf("%-12s", "TYPE")) + "   " +
-			headerStyle.Render(fmt.Sprintf("%8s", "VERSION"+m.sortIndicator(SortByVersion)))
-		lines = append(lines, header)
+	header := "  " +
+		headerStyle.Render(fmt.Sprintf("%-*s", nameWidth, "NAME"+m.sortIndicator(SortByName))) + "   " +
+		headerStyle.Render(fmt.Sprintf("%-12s", "TYPE")) + "   " +
+		headerStyle.Render(fmt.Sprintf("%8s", "VERSION"+m.sortIndicator(SortByVersion)))
+	if showTags {
+		header += "   " + headerStyle.Render(fmt.Sprintf("%4s", "TAGS"))
 	}
+	if showModified {
+		header += "   " + headerStyle.Render(fmt.Sprintf("%16s", "MODIFIED"+m.sortIndicator(SortByModified))) + "  "
+	}
+	lines = append(lines, header)
 	lines = append(lines, "  "+separatorStyle.Render(strings.Repeat("─", m.state.Width-4)))
 
 	// Items - calculate how many we can show
@@ -251,11 +244,11 @@ func (m Model) renderBrowseView() string {
 		var itemLines []string
 		if m.state.Mode == ViewModeTree {
 			b := &strings.Builder{}
-			m.renderTreeItems(b, start, end, showModified)
+			m.renderTreeItems(b, start, end, showModified, showTags)
 			itemLines = strings.Split(strings.TrimSuffix(b.String(), "\n"), "\n")
 		} else {
 			b := &strings.Builder{}
-			m.renderListItems(b, start, end, showModified)
+			m.renderListItems(b, start, end, showModified, showTags)
 			itemLines = strings.Split(strings.TrimSuffix(b.String(), "\n"), "\n")
 		}
 		lines = append(lines, itemLines...)
@@ -315,52 +308,60 @@ func (m Model) renderBrowseView() string {
 	return strings.Join(lines, "\n")
 }
 
-// renderListItems renders items in flat list view
-func (m Model) renderListItems(b *strings.Builder, start, end int, showModified bool) {
-	// Calculate name width based on terminal width
-	var nameWidth int
-	if showModified {
-		nameWidth = m.state.Width - 47 - 2
-		if nameWidth < 20 {
-			nameWidth = 20
-		}
-	} else {
-		nameWidth = m.state.Width - 26 - 2
-		if nameWidth < 20 {
-			nameWidth = 20
-		}
+// tagCountStr returns the tag count display string for a cache entry
+func tagCountStr(entry cache.CacheEntry) string {
+	if len(entry.Tags) == 0 {
+		return "-"
 	}
+	return fmt.Sprintf("%d", len(entry.Tags))
+}
+
+// calcNameWidth computes the name column width based on visible columns
+func calcNameWidth(totalWidth int, showModified, showTags bool) int {
+	fixed := 28 // 2(indent) + 3(gap) + 12(TYPE) + 3(gap) + 8(VERSION)
+	if showModified {
+		fixed += 21 // 3(gap) + 16(MODIFIED) + 2(trail)
+	}
+	if showTags {
+		fixed += 7 // 3(gap) + 4(TAGS)
+	}
+	w := totalWidth - fixed
+	if w < 20 {
+		w = 20
+	}
+	return w
+}
+
+// renderListItems renders items in flat list view
+func (m Model) renderListItems(b *strings.Builder, start, end int, showModified, showTags bool) {
+	nameWidth := calcNameWidth(m.state.Width, showModified, showTags)
 
 	for i := start; i < end; i++ {
 		entry := m.state.FilteredItems[i]
+		name := truncateString(entry.Name, nameWidth-2)
 
 		if i == m.state.SelectedIndex {
 			// Selected row: single highlight color across entire line
-			var line string
+			line := fmt.Sprintf("  %-*s   %-12s   %8d", nameWidth, name, entry.Type, entry.Version)
+			if showTags {
+				line += fmt.Sprintf("   %4s", tagCountStr(entry))
+			}
 			if showModified {
-				name := truncateString(entry.Name, nameWidth-2)
-				modifiedStr := entry.LastModifiedDate.Format("2006-01-02 15:04")
-				line = fmt.Sprintf("  %-*s   %-12s   %8d   %16s  ", nameWidth, name, entry.Type, entry.Version, modifiedStr)
-			} else {
-				name := truncateString(entry.Name, nameWidth-2)
-				line = fmt.Sprintf("  %-*s   %-12s   %8d", nameWidth, name, entry.Type, entry.Version)
+				line += fmt.Sprintf("   %16s  ", entry.LastModifiedDate.Format("2006-01-02 15:04"))
 			}
 			b.WriteString(selectedStyle.Render(line))
 		} else {
 			// Non-selected row: per-column coloring
-			name := truncateString(entry.Name, nameWidth-2)
+			b.WriteString("  " +
+				nameColStyle.Render(fmt.Sprintf("%-*s", nameWidth, name)) + "   " +
+				typeColStyle.Render(fmt.Sprintf("%-12s", entry.Type)) + "   " +
+				versionColStyle.Render(fmt.Sprintf("%8d", entry.Version)))
+			if showTags {
+				b.WriteString("   " + tagColStyle.Render(fmt.Sprintf("%4s", tagCountStr(entry))))
+			}
 			if showModified {
 				modifiedStr := entry.LastModifiedDate.Format("2006-01-02 15:04")
-				b.WriteString("  " +
-					nameColStyle.Render(fmt.Sprintf("%-*s", nameWidth, name)) + "   " +
-					typeColStyle.Render(fmt.Sprintf("%-12s", entry.Type)) + "   " +
-					versionColStyle.Render(fmt.Sprintf("%8d", entry.Version)) + "   " +
-					modifiedColStyle.Render(fmt.Sprintf("%16s", modifiedStr)) + "  ")
-			} else {
-				b.WriteString("  " +
-					nameColStyle.Render(fmt.Sprintf("%-*s", nameWidth, name)) + "   " +
-					typeColStyle.Render(fmt.Sprintf("%-12s", entry.Type)) + "   " +
-					versionColStyle.Render(fmt.Sprintf("%8d", entry.Version)))
+				b.WriteString("   " + modifiedColStyle.Render(fmt.Sprintf("%16s", modifiedStr)) + "  ")
 			}
 		}
 		b.WriteString("\n")
@@ -368,24 +369,12 @@ func (m Model) renderListItems(b *strings.Builder, start, end int, showModified 
 }
 
 // renderTreeItems renders items in tree view
-func (m Model) renderTreeItems(b *strings.Builder, start, end int, showModified bool) {
+func (m Model) renderTreeItems(b *strings.Builder, start, end int, showModified, showTags bool) {
 	if len(m.state.TreeNodes) == 0 {
 		return
 	}
 
-	// Calculate name width based on terminal width and fixed columns
-	var nameWidth int
-	if showModified {
-		nameWidth = m.state.Width - 47 - 2
-		if nameWidth < 20 {
-			nameWidth = 20
-		}
-	} else {
-		nameWidth = m.state.Width - 26 - 2
-		if nameWidth < 20 {
-			nameWidth = 20
-		}
-	}
+	nameWidth := calcNameWidth(m.state.Width, showModified, showTags)
 
 	for i := start; i < end && i < len(m.state.TreeNodes); i++ {
 		node := m.state.TreeNodes[i]
@@ -422,13 +411,13 @@ func (m Model) renderTreeItems(b *strings.Builder, start, end int, showModified 
 				if availableWidth < 10 {
 					availableWidth = 10
 				}
+				name := truncateString(node.Name, availableWidth-2)
+				line = fmt.Sprintf("  %s%s%-*s   %-12s   %8d", indent, prefix, availableWidth, name, entry.Type, entry.Version)
+				if showTags {
+					line += fmt.Sprintf("   %4s", tagCountStr(*entry))
+				}
 				if showModified {
-					name := truncateString(node.Name, availableWidth-2)
-					modifiedStr := entry.LastModifiedDate.Format("2006-01-02 15:04")
-					line = fmt.Sprintf("  %s%s%-*s   %-12s   %8d   %16s  ", indent, prefix, availableWidth, name, entry.Type, entry.Version, modifiedStr)
-				} else {
-					name := truncateString(node.Name, availableWidth-2)
-					line = fmt.Sprintf("  %s%s%-*s   %-12s   %8d", indent, prefix, availableWidth, name, entry.Type, entry.Version)
+					line += fmt.Sprintf("   %16s  ", entry.LastModifiedDate.Format("2006-01-02 15:04"))
 				}
 			}
 			b.WriteString(selectedStyle.Render(line))
@@ -452,18 +441,16 @@ func (m Model) renderTreeItems(b *strings.Builder, start, end int, showModified 
 				availableWidth = 10
 			}
 			name := truncateString(node.Name, availableWidth-2)
+			b.WriteString("  " + indent + prefix +
+				nameColStyle.Render(fmt.Sprintf("%-*s", availableWidth, name)) + "   " +
+				typeColStyle.Render(fmt.Sprintf("%-12s", entry.Type)) + "   " +
+				versionColStyle.Render(fmt.Sprintf("%8d", entry.Version)))
+			if showTags {
+				b.WriteString("   " + tagColStyle.Render(fmt.Sprintf("%4s", tagCountStr(*entry))))
+			}
 			if showModified {
 				modifiedStr := entry.LastModifiedDate.Format("2006-01-02 15:04")
-				b.WriteString("  " + indent + prefix +
-					nameColStyle.Render(fmt.Sprintf("%-*s", availableWidth, name)) + "   " +
-					typeColStyle.Render(fmt.Sprintf("%-12s", entry.Type)) + "   " +
-					versionColStyle.Render(fmt.Sprintf("%8d", entry.Version)) + "   " +
-					modifiedColStyle.Render(fmt.Sprintf("%16s", modifiedStr)) + "  ")
-			} else {
-				b.WriteString("  " + indent + prefix +
-					nameColStyle.Render(fmt.Sprintf("%-*s", availableWidth, name)) + "   " +
-					typeColStyle.Render(fmt.Sprintf("%-12s", entry.Type)) + "   " +
-					versionColStyle.Render(fmt.Sprintf("%8d", entry.Version)))
+				b.WriteString("   " + modifiedColStyle.Render(fmt.Sprintf("%16s", modifiedStr)) + "  ")
 			}
 		}
 		b.WriteString("\n")
