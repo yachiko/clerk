@@ -903,6 +903,13 @@ func (m Model) handleDescribeKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case "C":
+		// Copy parameter name/path
+		if m.state.DescribeParamName != "" {
+			return m, m.copyValue(m.state.DescribeParamName)
+		}
+		return m, nil
+
 	case "e":
 		// Edit parameter
 		if m.state.DescribeParamName != "" {
