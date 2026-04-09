@@ -84,6 +84,40 @@ var (
 			Padding(1, 2).
 			Width(50)
 
+	// Column-level styles for k9s-inspired coloring
+	nameColStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("252")) // White - primary identifier
+
+	typeColStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("243")) // Dim gray
+
+	versionColStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("214")) // Yellow/orange - stands out
+
+	modifiedColStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("243")) // Dim gray
+
+	separatorStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("240")) // Subtle gray for separators
+
+	helpKeyStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("214")).
+			Bold(true) // Yellow keys
+
+	helpDescStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("243")) // Dim descriptions
+
+	// Describe view - version history coloring
+	histVersionStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("214")) // Yellow version number
+
+	histDateStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("243")) // Dim date
+
+	panelHeaderStyle = lipgloss.NewStyle().
+				Bold(true).
+				Foreground(lipgloss.Color("86")).
+				Underline(true)
 )
 
 const (
@@ -93,21 +127,38 @@ const (
 	MaxLabelBadgeWidth = 12
 )
 
+// renderHelp renders a help line with highlighted keys
+// Takes pairs of (key, description) and renders key in yellow, description in dim
+func renderHelp(pairs ...string) string {
+	var parts []string
+	for i := 0; i+1 < len(pairs); i += 2 {
+		key := pairs[i]
+		desc := pairs[i+1]
+		parts = append(parts, helpKeyStyle.Render(key)+helpDescStyle.Render(":"+desc))
+	}
+	return strings.Join(parts, helpDescStyle.Render("  "))
+}
+
 // renderBrowseView renders the main browse view
 func (m Model) renderBrowseView() string {
 	var lines []string
 
-	// Title bar (fixed at top)
+	// Title bar - full width
 	mode := "LIST"
 	if m.state.Mode == ViewModeTree {
 		mode = "TREE"
 	}
-	title := titleStyle.Render(fmt.Sprintf(" CLERK - %s ", mode))
+	titleText := fmt.Sprintf(" CLERK - %s ", mode)
+	titlePad := m.state.Width - lipgloss.Width(titleText)
+	if titlePad < 0 {
+		titlePad = 0
+	}
+	title := titleStyle.Render(titleText + strings.Repeat(" ", titlePad))
 	lines = append(lines, title)
 
 	// Search bar (always visible, fixed at top)
 	if m.state.SearchActive {
-		searchLine := "  " + searchStyle.Render("🔍 ") + m.searchInput.View()
+		searchLine := "  " + searchStyle.Render("/ ") + m.searchInput.View()
 
 		// Show suggestion as ghost text
 		if m.state.CurrentSuggestion != "" && m.state.CurrentSuggestion != m.state.SearchQuery {
@@ -125,26 +176,31 @@ func (m Model) renderBrowseView() string {
 
 	// Header - varies based on width
 	showModified := m.state.Width >= 100 // Show modified column if width >= 100
-	var header string
 	var nameWidth int
 
 	if showModified {
-		// Fixed: 3 (spaces) + 12 (TYPE) + 3 (spaces) + 8 (VERSION) + 3 (spaces) + 16 (MODIFIED) + 2 (padding) = 47
-		nameWidth = m.state.Width - 47 - 2 // -2 for left padding
+		nameWidth = m.state.Width - 47 - 2
 		if nameWidth < 20 {
-			nameWidth = 20 // Minimum width for name
+			nameWidth = 20
 		}
-		header = headerStyle.Render(fmt.Sprintf("  %-*s   %-12s   %8s   %16s  ", nameWidth, "NAME", "TYPE", "VERSION", "MODIFIED"))
+		header := "  " +
+			headerStyle.Render(fmt.Sprintf("%-*s", nameWidth, "NAME"+m.sortIndicator(SortByName))) + "   " +
+			headerStyle.Render(fmt.Sprintf("%-12s", "TYPE")) + "   " +
+			headerStyle.Render(fmt.Sprintf("%8s", "VERSION"+m.sortIndicator(SortByVersion))) + "   " +
+			headerStyle.Render(fmt.Sprintf("%16s", "MODIFIED"+m.sortIndicator(SortByModified))) + "  "
+		lines = append(lines, header)
 	} else {
-		// Fixed: 3 (spaces) + 12 (TYPE) + 3 (spaces) + 8 (VERSION) = 26
-		nameWidth = m.state.Width - 26 - 2 // -2 for left padding
+		nameWidth = m.state.Width - 26 - 2
 		if nameWidth < 20 {
-			nameWidth = 20 // Minimum width for name
+			nameWidth = 20
 		}
-		header = headerStyle.Render(fmt.Sprintf("  %-*s   %-12s   %8s", nameWidth, "NAME", "TYPE", "VERSION"))
+		header := "  " +
+			headerStyle.Render(fmt.Sprintf("%-*s", nameWidth, "NAME"+m.sortIndicator(SortByName))) + "   " +
+			headerStyle.Render(fmt.Sprintf("%-12s", "TYPE")) + "   " +
+			headerStyle.Render(fmt.Sprintf("%8s", "VERSION"+m.sortIndicator(SortByVersion)))
+		lines = append(lines, header)
 	}
-	lines = append(lines, header)
-	lines = append(lines, "  "+strings.Repeat("─", m.state.Width-4))
+	lines = append(lines, "  "+separatorStyle.Render(strings.Repeat("─", m.state.Width-4)))
 
 	// Items - calculate how many we can show
 	visible := m.visibleRows()
@@ -183,8 +239,8 @@ func (m Model) renderBrowseView() string {
 		}
 	}
 
-	// Footer (always at bottom)
-	lines = append(lines, "  "+strings.Repeat("─", m.state.Width-4))
+	// Footer
+	lines = append(lines, "  "+separatorStyle.Render(strings.Repeat("─", m.state.Width-4)))
 
 	// Status/Error message
 	var statusLine string
@@ -212,14 +268,22 @@ func (m Model) renderBrowseView() string {
 	lines = append(lines, statusLine)
 
 	// Help line - varies by view mode
-	var help string
 	sortLabel := m.getSortLabel()
+	var help string
 	if m.state.Mode == ViewModeTree {
-		help = fmt.Sprintf("↑↓:navigate  d:describe  e:edit  c:copy  m:move  p:copy  space:expand  s:sort(%s)  r:refresh  /:search  q:quit", sortLabel)
+		help = "  " + renderHelp(
+			"↑↓", "navigate", "d", "describe", "e", "edit", "c", "copy",
+			"m", "move", "p", "copy-to", "space", "expand",
+			"s", "sort("+sortLabel+")", "S", "reverse", "r", "refresh", "/", "search", "q", "quit",
+		) + "  "
 	} else {
-		help = fmt.Sprintf("↑↓:navigate  d:describe  e:edit  c:copy  m:move  p:copy  t:tree  s:sort(%s)  r:refresh  /:search  q:quit", sortLabel)
+		help = "  " + renderHelp(
+			"↑↓", "navigate", "d", "describe", "e", "edit", "c", "copy",
+			"m", "move", "p", "copy-to", "t", "tree",
+			"s", "sort("+sortLabel+")", "S", "reverse", "r", "refresh", "/", "search", "q", "quit",
+		) + "  "
 	}
-	lines = append(lines, helpStyle.Render("  "+help+"  "))
+	lines = append(lines, help)
 
 	return strings.Join(lines, "\n")
 }
@@ -229,14 +293,12 @@ func (m Model) renderListItems(b *strings.Builder, start, end int, showModified 
 	// Calculate name width based on terminal width
 	var nameWidth int
 	if showModified {
-		// Fixed: 3 (spaces) + 12 (TYPE) + 3 (spaces) + 8 (VERSION) + 3 (spaces) + 16 (MODIFIED) + 2 (padding) = 47
-		nameWidth = m.state.Width - 47 - 2 // -2 for left padding
+		nameWidth = m.state.Width - 47 - 2
 		if nameWidth < 20 {
 			nameWidth = 20
 		}
 	} else {
-		// Fixed: 3 (spaces) + 12 (TYPE) + 3 (spaces) + 8 (VERSION) = 26
-		nameWidth = m.state.Width - 26 - 2 // -2 for left padding
+		nameWidth = m.state.Width - 26 - 2
 		if nameWidth < 20 {
 			nameWidth = 20
 		}
@@ -245,20 +307,34 @@ func (m Model) renderListItems(b *strings.Builder, start, end int, showModified 
 	for i := start; i < end; i++ {
 		entry := m.state.FilteredItems[i]
 
-		var line string
-		if showModified {
-			name := truncateString(entry.Name, nameWidth-2) // -2 for padding
-			modifiedStr := entry.LastModifiedDate.Format("2006-01-02 15:04")
-			line = fmt.Sprintf("  %-*s   %-12s   %8d   %16s  ", nameWidth, name, entry.Type, entry.Version, modifiedStr)
-		} else {
-			name := truncateString(entry.Name, nameWidth-2) // -2 for padding
-			line = fmt.Sprintf("  %-*s   %-12s   %8d", nameWidth, name, entry.Type, entry.Version)
-		}
-
 		if i == m.state.SelectedIndex {
+			// Selected row: single highlight color across entire line
+			var line string
+			if showModified {
+				name := truncateString(entry.Name, nameWidth-2)
+				modifiedStr := entry.LastModifiedDate.Format("2006-01-02 15:04")
+				line = fmt.Sprintf("  %-*s   %-12s   %8d   %16s  ", nameWidth, name, entry.Type, entry.Version, modifiedStr)
+			} else {
+				name := truncateString(entry.Name, nameWidth-2)
+				line = fmt.Sprintf("  %-*s   %-12s   %8d", nameWidth, name, entry.Type, entry.Version)
+			}
 			b.WriteString(selectedStyle.Render(line))
 		} else {
-			b.WriteString(normalStyle.Render(line))
+			// Non-selected row: per-column coloring
+			name := truncateString(entry.Name, nameWidth-2)
+			if showModified {
+				modifiedStr := entry.LastModifiedDate.Format("2006-01-02 15:04")
+				b.WriteString("  " +
+					nameColStyle.Render(fmt.Sprintf("%-*s", nameWidth, name)) + "   " +
+					typeColStyle.Render(fmt.Sprintf("%-12s", entry.Type)) + "   " +
+					versionColStyle.Render(fmt.Sprintf("%8d", entry.Version)) + "   " +
+					modifiedColStyle.Render(fmt.Sprintf("%16s", modifiedStr)) + "  ")
+			} else {
+				b.WriteString("  " +
+					nameColStyle.Render(fmt.Sprintf("%-*s", nameWidth, name)) + "   " +
+					typeColStyle.Render(fmt.Sprintf("%-12s", entry.Type)) + "   " +
+					versionColStyle.Render(fmt.Sprintf("%8d", entry.Version)))
+			}
 		}
 		b.WriteString("\n")
 	}
@@ -273,14 +349,12 @@ func (m Model) renderTreeItems(b *strings.Builder, start, end int, showModified 
 	// Calculate name width based on terminal width and fixed columns
 	var nameWidth int
 	if showModified {
-		// Fixed: 3 (spaces) + 12 (TYPE) + 3 (spaces) + 8 (VERSION) + 3 (spaces) + 16 (MODIFIED) + 2 (padding) = 47
-		nameWidth = m.state.Width - 47 - 2 // -2 for left padding
+		nameWidth = m.state.Width - 47 - 2
 		if nameWidth < 20 {
 			nameWidth = 20
 		}
 	} else {
-		// Fixed: 3 (spaces) + 12 (TYPE) + 3 (spaces) + 8 (VERSION) = 26
-		nameWidth = m.state.Width - 26 - 2 // -2 for left padding
+		nameWidth = m.state.Width - 26 - 2
 		if nameWidth < 20 {
 			nameWidth = 20
 		}
@@ -302,43 +376,68 @@ func (m Model) renderTreeItems(b *strings.Builder, start, end int, showModified 
 			prefix = "  "
 		}
 
-		// Build line content
-		var line string
-		if node.IsDir {
+		if i == m.state.SelectedIndex {
+			// Selected row: single highlight color
+			var line string
+			if node.IsDir {
+				dirName := node.Name + "/"
+				if node.ChildCount > 0 {
+					dirName += fmt.Sprintf(" (%d)", node.ChildCount)
+				}
+				dirNameWidth := nameWidth - len(indent) - 2
+				if dirNameWidth < 10 {
+					dirNameWidth = 10
+				}
+				line = fmt.Sprintf("  %s%s%-*s", indent, prefix, dirNameWidth, dirName)
+			} else {
+				entry := node.Entry
+				availableWidth := nameWidth - len(indent) - 2
+				if availableWidth < 10 {
+					availableWidth = 10
+				}
+				if showModified {
+					name := truncateString(node.Name, availableWidth-2)
+					modifiedStr := entry.LastModifiedDate.Format("2006-01-02 15:04")
+					line = fmt.Sprintf("  %s%s%-*s   %-12s   %8d   %16s  ", indent, prefix, availableWidth, name, entry.Type, entry.Version, modifiedStr)
+				} else {
+					name := truncateString(node.Name, availableWidth-2)
+					line = fmt.Sprintf("  %s%s%-*s   %-12s   %8d", indent, prefix, availableWidth, name, entry.Type, entry.Version)
+				}
+			}
+			b.WriteString(selectedStyle.Render(line))
+		} else if node.IsDir {
+			// Directory: dim style
 			dirName := node.Name + "/"
 			if node.ChildCount > 0 {
 				dirName += fmt.Sprintf(" (%d)", node.ChildCount)
 			}
-			// For directories, use dynamic width considering indent
 			dirNameWidth := nameWidth - len(indent) - 2
 			if dirNameWidth < 10 {
 				dirNameWidth = 10
 			}
-			line = fmt.Sprintf("  %s%s%-*s", indent, prefix, dirNameWidth, dirName)
+			line := fmt.Sprintf("  %s%s%-*s", indent, prefix, dirNameWidth, dirName)
+			b.WriteString(dimStyle.Render(line))
 		} else {
+			// File node: per-column coloring
 			entry := node.Entry
-			// Account for indent when calculating available space
 			availableWidth := nameWidth - len(indent) - 2
 			if availableWidth < 10 {
 				availableWidth = 10
 			}
-
+			name := truncateString(node.Name, availableWidth-2)
 			if showModified {
-				name := truncateString(node.Name, availableWidth-2)
 				modifiedStr := entry.LastModifiedDate.Format("2006-01-02 15:04")
-				line = fmt.Sprintf("  %s%s%-*s   %-12s   %8d   %16s  ", indent, prefix, availableWidth, name, entry.Type, entry.Version, modifiedStr)
+				b.WriteString("  " + indent + prefix +
+					nameColStyle.Render(fmt.Sprintf("%-*s", availableWidth, name)) + "   " +
+					typeColStyle.Render(fmt.Sprintf("%-12s", entry.Type)) + "   " +
+					versionColStyle.Render(fmt.Sprintf("%8d", entry.Version)) + "   " +
+					modifiedColStyle.Render(fmt.Sprintf("%16s", modifiedStr)) + "  ")
 			} else {
-				name := truncateString(node.Name, availableWidth-2)
-				line = fmt.Sprintf("  %s%s%-*s   %-12s   %8d", indent, prefix, availableWidth, name, entry.Type, entry.Version)
+				b.WriteString("  " + indent + prefix +
+					nameColStyle.Render(fmt.Sprintf("%-*s", availableWidth, name)) + "   " +
+					typeColStyle.Render(fmt.Sprintf("%-12s", entry.Type)) + "   " +
+					versionColStyle.Render(fmt.Sprintf("%8d", entry.Version)))
 			}
-		}
-
-		if i == m.state.SelectedIndex {
-			b.WriteString(selectedStyle.Render(line))
-		} else if node.IsDir {
-			b.WriteString(dimStyle.Render(line))
-		} else {
-			b.WriteString(normalStyle.Render(line))
 		}
 		b.WriteString("\n")
 	}
@@ -354,8 +453,13 @@ func (m Model) renderDescribeView() string {
 
 	entry := m.state.DescribeEntry
 
-	// Title (fixed at top)
-	title := titleStyle.Render(" DESCRIBE ")
+	// Title - full width
+	titleText := " DESCRIBE "
+	titlePad := m.state.Width - lipgloss.Width(titleText)
+	if titlePad < 0 {
+		titlePad = 0
+	}
+	title := titleStyle.Render(titleText + strings.Repeat(" ", titlePad))
 	output = append(output, title)
 
 	// Empty line (equivalent to search bar in browse view for layout consistency)
@@ -366,22 +470,16 @@ func (m Model) renderDescribeView() string {
 	output = append(output, box)
 
 	// Separator line (matching browse view structure)
-	output = append(output, "  "+strings.Repeat("─", m.state.Width-4))
+	output = append(output, "  "+separatorStyle.Render(strings.Repeat("─", m.state.Width-4)))
 
 	// Calculate panel dimensions
-	// Left panel: MarginLeft(2) + Width(35) = 37 total
-	// Right panel: Width(rightWidth) + MarginRight(2) = rightWidth + 2 total
-	// Total: 37 + rightWidth + 2 = m.state.Width
-	// So: rightWidth = m.state.Width - 39
-	leftWidth := 35                  // Version history panel width
-	rightWidth := m.state.Width - 43 // Account for left panel (37) and right margin (2)
+	leftWidth := 35
+	rightWidth := m.state.Width - 43
 	if rightWidth < 40 {
 		rightWidth = 40
 	}
 
 	// Calculate available height for panels
-	// Title(1) + empty(1) + header(1-2) + separator(1) + panels + separator(1) + status(1) + help(1) = Height
-	// Header is now compact: 1-2 lines instead of 5-7
 	panelHeight := m.state.Height - 8
 	if panelHeight < 10 {
 		panelHeight = 10
@@ -406,7 +504,7 @@ func (m Model) renderDescribeView() string {
 	}
 
 	// Footer separator (matching browse view structure)
-	output = append(output, "  "+strings.Repeat("─", m.state.Width-4))
+	output = append(output, "  "+separatorStyle.Render(strings.Repeat("─", m.state.Width-4)))
 
 	// Status/Error message
 	var statusLine string
@@ -422,9 +520,9 @@ func (m Model) renderDescribeView() string {
 	}
 	output = append(output, statusLine)
 
-	// Help (matching browse view structure - same formatting as browse)
-	help := m.renderDescribeHelp()
-	output = append(output, helpStyle.Render("  "+help+"  "))
+	// Help
+	help := "  " + m.renderDescribeHelp() + "  "
+	output = append(output, help)
 
 	view := strings.Join(output, "\n")
 
@@ -441,8 +539,8 @@ func (m Model) renderDescribeView() string {
 func (m Model) renderVersionHistoryPanel(width, height int) string {
 	var lines []string
 
-	// Header
-	header := labelStyle.Render("VERSION HISTORY")
+	// Header with underline
+	header := panelHeaderStyle.Render("VERSION HISTORY")
 	lines = append(lines, header)
 	lines = append(lines, "")
 
@@ -450,7 +548,7 @@ func (m Model) renderVersionHistoryPanel(width, height int) string {
 		lines = append(lines, dimStyle.Render("Loading..."))
 	} else {
 		// Calculate how many items fit in the panel
-		maxVisible := height - 4 // Subtract header and padding
+		maxVisible := height - 4
 		if maxVisible < 1 {
 			maxVisible = 1
 		}
@@ -463,20 +561,24 @@ func (m Model) renderVersionHistoryPanel(width, height int) string {
 
 		for i := start; i < end; i++ {
 			h := m.state.DescribeHistory[i]
-			versionStr := fmt.Sprintf("v%d - %s", h.Version, h.Modified)
-
-			// Add label badges if present
-			labelBadges := ""
-			if len(h.Labels) > 0 {
-				labelBadges = " " + renderInlineBadges(h.Labels)
-			}
-
-			displayStr := versionStr + labelBadges
 
 			if i == m.state.HistoryIndex {
-				lines = append(lines, selectedStyle.Render("▸ "+displayStr))
+				// Selected: uniform highlight
+				versionStr := fmt.Sprintf("v%d - %s", h.Version, h.Modified)
+				labelBadges := ""
+				if len(h.Labels) > 0 {
+					labelBadges = " " + renderInlineBadges(h.Labels)
+				}
+				lines = append(lines, selectedStyle.Render("▸ "+versionStr)+labelBadges)
 			} else {
-				lines = append(lines, normalStyle.Render("  "+displayStr))
+				// Non-selected: colored version number + dim date
+				vStr := histVersionStyle.Render(fmt.Sprintf("v%d", h.Version))
+				dStr := histDateStyle.Render(" - " + h.Modified)
+				labelBadges := ""
+				if len(h.Labels) > 0 {
+					labelBadges = " " + renderInlineBadges(h.Labels)
+				}
+				lines = append(lines, "  "+vStr+dStr+labelBadges)
 			}
 		}
 	}
@@ -509,8 +611,8 @@ func (m Model) renderVersionHistoryPanel(width, height int) string {
 func (m Model) renderValuePanel(width, height int) string {
 	var lines []string
 
-	// Header
-	header := labelStyle.Render("VALUE")
+	// Header with underline
+	header := panelHeaderStyle.Render("VALUE")
 	if m.state.DescribeMasked {
 		header += " " + dimStyle.Render("(masked)")
 	}
@@ -539,7 +641,7 @@ func (m Model) renderValuePanel(width, height int) string {
 		valueLines := strings.Split(value, "\n")
 
 		// Calculate available lines for content
-		availableLines := height - 5 // Subtract header, padding, scroll indicator
+		availableLines := height - 5
 		if availableLines < 1 {
 			availableLines = 1
 		}
@@ -558,7 +660,7 @@ func (m Model) renderValuePanel(width, height int) string {
 		}
 
 		// Render visible lines with wrapping or horizontal scrolling
-		contentWidth := width - 4 // Account for border and padding
+		contentWidth := width - 4
 		for i := start; i < end; i++ {
 			line := valueLines[i]
 
@@ -571,7 +673,6 @@ func (m Model) renderValuePanel(width, height int) string {
 						lines = append(lines, valueStyle.Render(line))
 					}
 				} else {
-					// Wrap at contentWidth boundaries
 					for pos := 0; pos < len(line); pos += contentWidth {
 						endPos := pos + contentWidth
 						if endPos > len(line) {
@@ -662,13 +763,10 @@ func min(a, b int) int {
 
 // renderDescribeBox renders the parameter info as a compact header line
 func (m Model) renderDescribeBox(entry *cache.CacheEntry) string {
-	// Use the same layout as browse view data rows (not header)
 	showModified := m.state.Width >= 100
 	var nameWidth int
-	var line string
 
 	if showModified {
-		// Fixed: 3 (spaces) + 12 (TYPE) + 3 (spaces) + 8 (VERSION) + 3 (spaces) + 16 (MODIFIED) + 2 (padding) = 47
 		nameWidth = m.state.Width - 47 - 2
 		if nameWidth < 20 {
 			nameWidth = 20
@@ -678,35 +776,37 @@ func (m Model) renderDescribeBox(entry *cache.CacheEntry) string {
 			name = name[:nameWidth-2]
 		}
 		modifiedStr := entry.LastModifiedDate.Format("2006-01-02 15:04")
-		// Format first without styling (same as browse view)
-		line = fmt.Sprintf("  %-*s   %-12s   %8d   %16s  ",
-			nameWidth,
-			name,
-			entry.Type,
-			entry.Version,
-			modifiedStr)
-	} else {
-		// Fixed: 3 (spaces) + 12 (TYPE) + 3 (spaces) + 8 (VERSION) = 26
-		nameWidth = m.state.Width - 26 - 2
-		if nameWidth < 20 {
-			nameWidth = 20
+		// Per-column coloring
+		info := "  " +
+			nameColStyle.Render(fmt.Sprintf("%-*s", nameWidth, name)) + "   " +
+			typeColStyle.Render(fmt.Sprintf("%-12s", entry.Type)) + "   " +
+			versionColStyle.Render(fmt.Sprintf("%8d", entry.Version)) + "   " +
+			modifiedColStyle.Render(fmt.Sprintf("%16s", modifiedStr)) + "  "
+
+		if len(entry.Tags) > 0 {
+			var tagPairs []string
+			for k, v := range entry.Tags {
+				tagPairs = append(tagPairs, fmt.Sprintf("%s=%s", k, v))
+			}
+			tagsLine := dimStyle.Render("  Tags: " + strings.Join(tagPairs, ", "))
+			return info + "\n" + tagsLine
 		}
-		name := entry.Name
-		if len(name) > nameWidth-2 {
-			name = name[:nameWidth-2]
-		}
-		// Format first without styling (same as browse view)
-		line = fmt.Sprintf("  %-*s   %-12s   %8d",
-			nameWidth,
-			name,
-			entry.Type,
-			entry.Version)
+		return info
 	}
 
-	// Apply styling to the whole line (like browse view does for normal rows)
-	info := normalStyle.Render(line)
+	nameWidth = m.state.Width - 26 - 2
+	if nameWidth < 20 {
+		nameWidth = 20
+	}
+	name := entry.Name
+	if len(name) > nameWidth-2 {
+		name = name[:nameWidth-2]
+	}
+	info := "  " +
+		nameColStyle.Render(fmt.Sprintf("%-*s", nameWidth, name)) + "   " +
+		typeColStyle.Render(fmt.Sprintf("%-12s", entry.Type)) + "   " +
+		versionColStyle.Render(fmt.Sprintf("%8d", entry.Version))
 
-	// Add tags on second line if present
 	if len(entry.Tags) > 0 {
 		var tagPairs []string
 		for k, v := range entry.Tags {
@@ -715,7 +815,6 @@ func (m Model) renderDescribeBox(entry *cache.CacheEntry) string {
 		tagsLine := dimStyle.Render("  Tags: " + strings.Join(tagPairs, ", "))
 		return info + "\n" + tagsLine
 	}
-
 	return info
 }
 
@@ -897,8 +996,8 @@ func renderLabelInput(m Model) string {
 	// Version context
 	if len(m.state.DescribeHistory) > 0 && m.state.HistoryIndex < len(m.state.DescribeHistory) {
 		currentVersion := m.state.DescribeHistory[m.state.HistoryIndex].Version
-		b.WriteString(fmt.Sprintf("Version: %d\n", currentVersion))
-		b.WriteString(fmt.Sprintf("Parameter: %s\n\n", m.state.DescribeEntry.Name))
+		b.WriteString(dimStyle.Render("Version: ") + versionColStyle.Render(fmt.Sprintf("%d", currentVersion)) + "\n")
+		b.WriteString(dimStyle.Render("Parameter: ") + nameColStyle.Render(m.state.DescribeEntry.Name) + "\n\n")
 	}
 
 	// Input field
@@ -928,12 +1027,18 @@ func renderLabelInput(m Model) string {
 	}
 
 	// Help text
-	b.WriteString(dimStyle.Render("Enter:submit  Tab:next  Esc:cancel"))
+	b.WriteString(renderHelp("Enter", "submit", "Tab", "next", "Esc", "cancel"))
 
 	return dialogStyle.Render(b.String())
 }
 
 // renderDescribeHelp returns the help text for describe view
 func (m Model) renderDescribeHelp() string {
-	return "x:mask  c:copy  e:edit  tab/⇧tab:version  g:latest  a:add-label  r:remove-label  m:move-label  ↑↓:scroll  ←→:horiz  w:wrap  esc:back  q:quit"
+	return renderHelp(
+		"x", "mask", "c", "copy", "e", "edit",
+		"tab/⇧tab", "version", "g", "latest",
+		"a", "add-label", "r", "remove-label", "m", "move-label",
+		"↑↓", "scroll", "←→", "horiz", "w", "wrap",
+		"esc", "back", "q", "quit",
+	)
 }
