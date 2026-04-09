@@ -430,6 +430,46 @@ func (c *Client) UnlabelParameterVersion(ctx context.Context, input *UnlabelPara
 	return nil
 }
 
+// AddTagsToResource adds tags to a parameter
+func (c *Client) AddTagsToResource(ctx context.Context, name string, tags map[string]string) error {
+	var tagList []types.Tag
+	for k, v := range tags {
+		tagList = append(tagList, types.Tag{
+			Key:   aws.String(k),
+			Value: aws.String(v),
+		})
+	}
+
+	input := &ssm.AddTagsToResourceInput{
+		ResourceType: types.ResourceTypeForTaggingParameter,
+		ResourceId:   aws.String(name),
+		Tags:         tagList,
+	}
+
+	_, err := c.ssm.AddTagsToResource(ctx, input)
+	if err != nil {
+		return fmt.Errorf("failed to add tags: %w", err)
+	}
+
+	return nil
+}
+
+// RemoveTagsFromResource removes tags from a parameter by key
+func (c *Client) RemoveTagsFromResource(ctx context.Context, name string, tagKeys []string) error {
+	input := &ssm.RemoveTagsFromResourceInput{
+		ResourceType: types.ResourceTypeForTaggingParameter,
+		ResourceId:   aws.String(name),
+		TagKeys:      tagKeys,
+	}
+
+	_, err := c.ssm.RemoveTagsFromResource(ctx, input)
+	if err != nil {
+		return fmt.Errorf("failed to remove tags: %w", err)
+	}
+
+	return nil
+}
+
 // GetParameterByLabel retrieves a parameter version by label
 func (c *Client) GetParameterByLabel(ctx context.Context, name, label string, withDecryption bool) (*Parameter, error) {
 	labeledName := fmt.Sprintf("%s:%s", name, label)
