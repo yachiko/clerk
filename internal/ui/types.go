@@ -24,6 +24,30 @@ const (
 	SortByVersion
 )
 
+// FilterType represents filtering by parameter type
+type FilterType int
+
+const (
+	FilterAll FilterType = iota
+	FilterSecureString
+	FilterString
+	FilterStringList
+)
+
+// String returns the display label for a FilterType
+func (f FilterType) String() string {
+	switch f {
+	case FilterSecureString:
+		return "SecureString"
+	case FilterString:
+		return "String"
+	case FilterStringList:
+		return "StringList"
+	default:
+		return "All"
+	}
+}
+
 // State represents the UI state
 type State struct {
 	// Data
@@ -46,6 +70,9 @@ type State struct {
 	// Sorting
 	SortType      SortType
 	SortAscending bool
+
+	// Type filter
+	FilterType FilterType
 
 	// Describe view state
 	DescribeEntry         *cache.CacheEntry
