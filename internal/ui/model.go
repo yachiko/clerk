@@ -741,6 +741,21 @@ func (m Model) handleBrowseKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.sortEntries()
 		return m, nil
 
+	case "f":
+		// Cycle through type filters: All -> SecureString -> String -> StringList -> All
+		switch m.state.FilterType {
+		case FilterAll:
+			m.state.FilterType = FilterSecureString
+		case FilterSecureString:
+			m.state.FilterType = FilterString
+		case FilterString:
+			m.state.FilterType = FilterStringList
+		case FilterStringList:
+			m.state.FilterType = FilterAll
+		}
+		m.filterEntries()
+		return m, nil
+
 	case " ":
 		// Toggle expand/collapse in tree view
 		if m.state.Mode == ViewModeTree && len(m.state.TreeNodes) > 0 {
@@ -1154,17 +1169,23 @@ func (m *Model) updatePathSuggestions() {
 	}
 }
 
-// filterEntries filters and sorts entries based on search query and sort order
+// filterEntries filters and sorts entries based on search query, type filter, and sort order
 func (m *Model) filterEntries() {
-	if m.state.SearchQuery == "" {
+	var filtered []cache.CacheEntry
+	for _, e := range m.state.Entries {
+		// Apply search filter
+		if m.state.SearchQuery != "" && !matchSearch(m.state.SearchQuery, e.Name) {
+			continue
+		}
+		// Apply type filter
+		if m.state.FilterType != FilterAll && e.Type != m.state.FilterType.String() {
+			continue
+		}
+		filtered = append(filtered, e)
+	}
+	if m.state.SearchQuery == "" && m.state.FilterType == FilterAll {
 		m.state.FilteredItems = m.state.Entries
 	} else {
-		var filtered []cache.CacheEntry
-		for _, e := range m.state.Entries {
-			if matchSearch(m.state.SearchQuery, e.Name) {
-				filtered = append(filtered, e)
-			}
-		}
 		m.state.FilteredItems = filtered
 		m.state.ScrollOffset = 0 // Reset scroll to top when filtering
 	}

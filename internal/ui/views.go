@@ -156,6 +156,12 @@ func (m Model) renderBrowseView() string {
 	title := titleStyle.Render(titleText + strings.Repeat(" ", titlePad))
 	lines = append(lines, title)
 
+	// Type filter badge (right-aligned)
+	filterBadge := ""
+	if m.state.FilterType != FilterAll {
+		filterBadge = searchStyle.Render("[" + m.state.FilterType.String() + "]")
+	}
+
 	// Search bar (always visible, fixed at top)
 	if m.state.SearchActive {
 		searchLine := "  " + searchStyle.Render("/ ") + m.searchInput.View()
@@ -167,9 +173,30 @@ func (m Model) renderBrowseView() string {
 			searchLine += dimStyle.Render(ghostText)
 		}
 
+		if filterBadge != "" {
+			gap := m.state.Width - lipgloss.Width(searchLine) - lipgloss.Width(filterBadge)
+			if gap < 1 {
+				gap = 1
+			}
+			searchLine += strings.Repeat(" ", gap) + filterBadge
+		}
 		lines = append(lines, searchLine)
 	} else if m.state.SearchQuery != "" {
-		lines = append(lines, dimStyle.Render("  Filter: "+m.state.SearchQuery+" (/ to edit)"))
+		searchLine := dimStyle.Render("  Filter: " + m.state.SearchQuery + " (/ to edit)")
+		if filterBadge != "" {
+			gap := m.state.Width - lipgloss.Width(searchLine) - lipgloss.Width(filterBadge)
+			if gap < 1 {
+				gap = 1
+			}
+			searchLine += strings.Repeat(" ", gap) + filterBadge
+		}
+		lines = append(lines, searchLine)
+	} else if filterBadge != "" {
+		gap := m.state.Width - 2 - lipgloss.Width(filterBadge)
+		if gap < 1 {
+			gap = 1
+		}
+		lines = append(lines, strings.Repeat(" ", 2+gap)+filterBadge)
 	} else {
 		lines = append(lines, "")
 	}
@@ -274,13 +301,13 @@ func (m Model) renderBrowseView() string {
 		help = "  " + renderHelp(
 			"↑↓", "navigate", "d", "describe", "e", "edit", "c", "copy",
 			"m", "move", "p", "copy-to", "space", "expand",
-			"s", "sort("+sortLabel+")", "S", "reverse", "r", "refresh", "/", "search", "q", "quit",
+			"s", "sort("+sortLabel+")", "S", "reverse", "f", "filter", "r", "refresh", "/", "search", "q", "quit",
 		) + "  "
 	} else {
 		help = "  " + renderHelp(
 			"↑↓", "navigate", "d", "describe", "e", "edit", "c", "copy",
 			"m", "move", "p", "copy-to", "t", "tree",
-			"s", "sort("+sortLabel+")", "S", "reverse", "r", "refresh", "/", "search", "q", "quit",
+			"s", "sort("+sortLabel+")", "S", "reverse", "f", "filter", "r", "refresh", "/", "search", "q", "quit",
 		) + "  "
 	}
 	lines = append(lines, help)
