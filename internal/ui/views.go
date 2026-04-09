@@ -527,7 +527,11 @@ func (m Model) renderDescribeView() string {
 	} else if m.state.StatusMessage != "" {
 		statusLine = statusStyle.Render("  ✓ " + m.state.StatusMessage)
 	} else if m.state.OfflineMode {
-		statusLine = dimStyle.Render("  [Offline Mode - Values unavailable]")
+		if m.state.DescribeEntry != nil && m.state.DescribeEntry.Type == "SecureString" {
+			statusLine = warningStyle.Render("  [Offline - SecureString values not cached]")
+		} else {
+			statusLine = dimStyle.Render("  [Offline Mode - Values unavailable]")
+		}
 	} else {
 		// Show empty line to match browse view when there's no status
 		statusLine = dimStyle.Render("  ")
@@ -650,7 +654,16 @@ func (m Model) renderValuePanel(width, height int) string {
 	lines = append(lines, "")
 
 	if m.state.DescribeValue == "" {
-		lines = append(lines, dimStyle.Render("Loading..."))
+		if m.state.OfflineMode && m.state.DescribeEntry != nil && m.state.DescribeEntry.Type == "SecureString" {
+			lines = append(lines, warningStyle.Render("SecureString - value not cached for security"))
+			lines = append(lines, "")
+			lines = append(lines, dimStyle.Render("Values are only available when connected to AWS."))
+			lines = append(lines, dimStyle.Render("Check your credentials and network connection."))
+		} else if m.state.OfflineMode {
+			lines = append(lines, warningStyle.Render("Value unavailable in offline mode"))
+		} else {
+			lines = append(lines, dimStyle.Render("Loading..."))
+		}
 	} else {
 		value := m.state.DescribeValue
 		if m.state.DescribeMasked {
