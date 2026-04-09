@@ -1049,7 +1049,7 @@ func renderLabelInput(m Model) string {
 // renderDescribeHelp returns the help text for describe view
 func (m Model) renderDescribeHelp() string {
 	return renderHelp(
-		"x", "mask", "c", "copy", "e", "edit",
+		"x", "mask", "c", "copy-val", "C", "copy-name", "e", "edit",
 		"tab/⇧tab", "version", "g", "latest",
 		"a", "add-label", "r", "remove-label", "m", "move-label",
 		"↑↓", "scroll", "←→", "horiz", "w", "wrap",
