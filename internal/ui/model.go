@@ -41,6 +41,7 @@ func NewModel(client *aws.Client, cacheMgr *cache.Manager, cfg *config.Config) M
 			PreviousMode:  ViewModeList,
 			ExpandedPaths: make(map[string]bool),
 			SortType:      SortByName,
+			SortAscending: true,
 		},
 		client:      client,
 		cache:       cacheMgr,
@@ -723,11 +724,20 @@ func (m Model) handleBrowseKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		switch m.state.SortType {
 		case SortByName:
 			m.state.SortType = SortByModified
+			m.state.SortAscending = false // modified defaults newest-first
 		case SortByModified:
 			m.state.SortType = SortByVersion
+			m.state.SortAscending = false // version defaults highest-first
 		case SortByVersion:
 			m.state.SortType = SortByName
+			m.state.SortAscending = true // name defaults A-Z
 		}
+		m.sortEntries()
+		return m, nil
+
+	case "S":
+		// Toggle sort direction
+		m.state.SortAscending = !m.state.SortAscending
 		m.sortEntries()
 		return m, nil
 
@@ -1171,36 +1181,38 @@ func (m *Model) filterEntries() {
 	}
 }
 
-// sortEntries sorts FilteredItems based on the current sort type
+// sortEntries sorts FilteredItems based on the current sort type and direction
 func (m *Model) sortEntries() {
 	if len(m.state.FilteredItems) == 0 {
 		return
 	}
 
+	asc := m.state.SortAscending
+
 	switch m.state.SortType {
 	case SortByName:
-		// Sort by name (ascending)
 		for i := 0; i < len(m.state.FilteredItems)-1; i++ {
 			for j := i + 1; j < len(m.state.FilteredItems); j++ {
-				if m.state.FilteredItems[j].Name < m.state.FilteredItems[i].Name {
+				less := m.state.FilteredItems[j].Name < m.state.FilteredItems[i].Name
+				if asc == less {
 					m.state.FilteredItems[i], m.state.FilteredItems[j] = m.state.FilteredItems[j], m.state.FilteredItems[i]
 				}
 			}
 		}
 	case SortByModified:
-		// Sort by last modified date (newest first)
 		for i := 0; i < len(m.state.FilteredItems)-1; i++ {
 			for j := i + 1; j < len(m.state.FilteredItems); j++ {
-				if m.state.FilteredItems[j].LastModifiedDate.After(m.state.FilteredItems[i].LastModifiedDate) {
+				less := m.state.FilteredItems[j].LastModifiedDate.Before(m.state.FilteredItems[i].LastModifiedDate)
+				if asc == less {
 					m.state.FilteredItems[i], m.state.FilteredItems[j] = m.state.FilteredItems[j], m.state.FilteredItems[i]
 				}
 			}
 		}
 	case SortByVersion:
-		// Sort by version (highest first)
 		for i := 0; i < len(m.state.FilteredItems)-1; i++ {
 			for j := i + 1; j < len(m.state.FilteredItems); j++ {
-				if m.state.FilteredItems[j].Version > m.state.FilteredItems[i].Version {
+				less := m.state.FilteredItems[j].Version < m.state.FilteredItems[i].Version
+				if asc == less {
 					m.state.FilteredItems[i], m.state.FilteredItems[j] = m.state.FilteredItems[j], m.state.FilteredItems[i]
 				}
 			}
@@ -1220,6 +1232,17 @@ func (m *Model) getSortLabel() string {
 	default:
 		return "unknown"
 	}
+}
+
+// sortIndicator returns ▲ or ▼ for the active sort column, empty for others
+func (m Model) sortIndicator(col SortType) string {
+	if m.state.SortType != col {
+		return ""
+	}
+	if m.state.SortAscending {
+		return " ▲"
+	}
+	return " ▼"
 }
 
 // matchSearch checks if name matches search query

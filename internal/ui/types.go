@@ -44,7 +44,8 @@ type State struct {
 	SuggestionIndex        int      // Index in alternatives (-1 = none)
 
 	// Sorting
-	SortType SortType
+	SortType      SortType
+	SortAscending bool
 
 	// Describe view state
 	DescribeEntry         *cache.CacheEntry
