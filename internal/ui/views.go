@@ -124,8 +124,8 @@ var (
 )
 
 const (
-	// MaxInlineLabels is the maximum number of labels to show inline in version history
-	MaxInlineLabels = 2
+	// MaxInlineLabels is the maximum number of labels to show on the label line in version history
+	MaxInlineLabels = 3
 	// MaxLabelBadgeWidth is the maximum width for a label badge before truncation
 	MaxLabelBadgeWidth = 12
 )
@@ -571,38 +571,40 @@ func (m Model) renderVersionHistoryPanel(width, height int) string {
 	if len(m.state.DescribeHistory) == 0 {
 		lines = append(lines, dimStyle.Render("Loading..."))
 	} else {
-		// Calculate how many items fit in the panel
-		maxVisible := height - 4
-		if maxVisible < 1 {
-			maxVisible = 1
+		// Calculate how many lines fit in the panel
+		maxLines := height - 4
+		if maxLines < 1 {
+			maxLines = 1
 		}
 
 		start := m.state.HistoryScrollOffset
-		end := start + maxVisible
-		if end > len(m.state.DescribeHistory) {
-			end = len(m.state.DescribeHistory)
-		}
 
-		for i := start; i < end; i++ {
+		// Render versions, stopping when we run out of panel space.
+		// Versions with labels take 2 lines; those without take 1.
+		linesUsed := 0
+		for i := start; i < len(m.state.DescribeHistory); i++ {
 			h := m.state.DescribeHistory[i]
+			needed := 1
+			if len(h.Labels) > 0 {
+				needed = 2
+			}
+			if linesUsed+needed > maxLines {
+				break
+			}
 
 			if i == m.state.HistoryIndex {
-				// Selected: uniform highlight
 				versionStr := fmt.Sprintf("v%d - %s", h.Version, h.Modified)
-				labelBadges := ""
-				if len(h.Labels) > 0 {
-					labelBadges = " " + renderInlineBadges(h.Labels)
-				}
-				lines = append(lines, selectedStyle.Render("▸ "+versionStr)+labelBadges)
+				lines = append(lines, selectedStyle.Render("▸ "+versionStr))
 			} else {
-				// Non-selected: colored version number + dim date
 				vStr := histVersionStyle.Render(fmt.Sprintf("v%d", h.Version))
 				dStr := histDateStyle.Render(" - " + h.Modified)
-				labelBadges := ""
-				if len(h.Labels) > 0 {
-					labelBadges = " " + renderInlineBadges(h.Labels)
-				}
-				lines = append(lines, "  "+vStr+dStr+labelBadges)
+				lines = append(lines, "  "+vStr+dStr)
+			}
+			linesUsed++
+
+			if len(h.Labels) > 0 {
+				lines = append(lines, "    "+renderInlineBadges(h.Labels))
+				linesUsed++
 			}
 		}
 	}
