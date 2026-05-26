@@ -25,7 +25,7 @@ type Config struct {
 func DefaultConfig() *Config {
 	return &Config{
 		Region:                   "us-east-1",
-		Profile:                  "default",
+		Profile:                  "", // empty = let AWS SDK pick (honors AWS_PROFILE or "default" profile if present)
 		CachePath:                "", // Will be set to $HOME/.clerk/cache.json
 		CacheTTL:                 3 * time.Hour,
 		ClipboardTimeout:         60 * time.Second,
