@@ -11,7 +11,7 @@ func TestDefaultConfig(t *testing.T) {
 	cfg := DefaultConfig()
 
 	assert.Equal(t, "us-east-1", cfg.Region)
-	assert.Equal(t, "default", cfg.Profile)
+	assert.Equal(t, "", cfg.Profile) // empty = SDK default (avoids forcing shared-config lookup)
 	assert.Equal(t, "", cfg.CachePath)
 	assert.Equal(t, 3*time.Hour, cfg.CacheTTL)
 	assert.Equal(t, 60*time.Second, cfg.ClipboardTimeout)
