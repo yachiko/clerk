@@ -95,16 +95,19 @@ Configuration is stored in `~/.clerk/config.json`.
 
 ### Available Settings
 
-| Option              | Default               | Description                      |
-| ------------------- | --------------------- | -------------------------------- |
-| `region`            | `us-east-1`           | AWS region                       |
-| `profile`           | `default`             | AWS profile                      |
-| `cache_path`        | `~/.clerk/cache.json` | Cache file location              |
-| `cache_ttl`         | `3h`                  | Cache time-to-live               |
-| `clipboard_timeout` | `60s`                 | Clear clipboard after duration   |
-| `default_type`      | `SecureString`        | Default parameter type           |
-| `default_sort`      | `name`                | Default sort order               |
-| `parallel_fetches`  | `10`                  | Concurrent API calls for refresh |
+| Option              | Default               | Description                                          |
+| ------------------- | --------------------- | ---------------------------------------------------- |
+| `region`            | `us-east-1`           | AWS region                                           |
+| `profile`           | `""` (SDK default)    | AWS profile; empty uses standard SDK credential chain |
+| `cache_ttl`         | `3h`                  | Cache time-to-live                                   |
+| `clipboard_timeout` | `60s`                 | Clear clipboard after duration                       |
+| `default_type`      | `SecureString`        | Default parameter type                               |
+| `default_sort`      | `name`                | Default sort order                                   |
+| `parallel_fetches`  | `10`                  | Concurrent API calls for refresh                     |
+
+Cache files live under `~/.clerk/cache/<account-id>/<region>.json` — separate
+files per AWS account and region, so switching profiles doesn't invalidate
+unrelated caches. The location isn't user-configurable.
 
 ### Example Config
 
@@ -112,7 +115,6 @@ Configuration is stored in `~/.clerk/config.json`.
 {
   "region": "us-east-1",
   "profile": "production",
-  "cache_path": "~/.clerk/cache.json",
   "cache_ttl": "3h0m0s",
   "clipboard_timeout": "60s",
   "default_type": "SecureString",
