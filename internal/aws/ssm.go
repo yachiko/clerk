@@ -37,7 +37,12 @@ func NewClient(ctx context.Context, opts ClientOptions) (*Client, error) {
 	if opts.Region != "" {
 		cfgOpts = append(cfgOpts, config.WithRegion(opts.Region))
 	}
-	if opts.Profile != "" {
+	// Skip WithSharedConfigProfile for the literal "default" profile: passing
+	// it explicitly forces the SDK to validate the profile exists in a config
+	// file, which fails on machines that rely purely on AWS_* env vars and
+	// have no ~/.aws/config. The SDK's intrinsic behavior already picks the
+	// "default" profile when none is specified.
+	if opts.Profile != "" && opts.Profile != "default" {
 		cfgOpts = append(cfgOpts, config.WithSharedConfigProfile(opts.Profile))
 	}
 

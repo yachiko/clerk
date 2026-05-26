@@ -20,7 +20,7 @@ func TestNewManager_FreshHome(t *testing.T) {
 
 	cfg := mgr.Get()
 	assert.Equal(t, "us-east-1", cfg.Region)
-	assert.Equal(t, "default", cfg.Profile)
+	assert.Equal(t, "", cfg.Profile)
 	// Default cache path is computed relative to HOME
 	assert.Equal(t, filepath.Join(home, ".clerk", "cache.json"), cfg.CachePath)
 }
@@ -66,7 +66,7 @@ func TestManager_GetValue(t *testing.T) {
 		expected string
 	}{
 		{"region", "us-east-1"},
-		{"profile", "default"},
+		{"profile", ""},
 		{"default_type", "SecureString"},
 		{"default.type", "SecureString"},
 		{"default_sort", "name"},

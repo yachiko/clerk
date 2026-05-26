@@ -109,14 +109,6 @@ func RunClerkInHome(ctx context.Context, cfg *IntegrationTestConfig, home string
 		home = tmp
 	}
 
-	// Clerk defaults Profile="default", which forces WithSharedConfigProfile.
-	// The SDK then requires the profile to exist in a config file even when
-	// AWS_ACCESS_KEY_ID/SECRET are set in env. Seed a minimal credentials file
-	// so the lookup succeeds; AWS_ENDPOINT_URL still routes the call to moto.
-	if err := seedAWSCredentials(home); err != nil {
-		return "", "", err
-	}
-
 	env := append([]string{}, sanitizedEnviron()...)
 	env = append(env,
 		"AWS_ENDPOINT_URL="+cfg.MotoEndpoint,
@@ -137,18 +129,6 @@ func RunClerkInHome(ctx context.Context, cfg *IntegrationTestConfig, home string
 
 	err := cmd.Run()
 	return stdout.String(), stderr.String(), err
-}
-
-// seedAWSCredentials writes a minimal ~/.aws/credentials inside home with a
-// [default] profile so the SDK's WithSharedConfigProfile("default") lookup
-// succeeds. The values are placeholder — env vars override at runtime.
-func seedAWSCredentials(home string) error {
-	awsDir := filepath.Join(home, ".aws")
-	if err := os.MkdirAll(awsDir, 0700); err != nil {
-		return fmt.Errorf("mkdir .aws: %w", err)
-	}
-	creds := "[default]\naws_access_key_id = testing\naws_secret_access_key = testing\n"
-	return os.WriteFile(filepath.Join(awsDir, "credentials"), []byte(creds), 0600)
 }
 
 // sanitizedEnviron returns os.Environ() minus AWS_* and HOME entries so they
