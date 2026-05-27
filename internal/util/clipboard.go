@@ -43,7 +43,7 @@ func (cm *ClipboardManager) Copy(text string) error {
 		go func() {
 			select {
 			case <-time.After(cm.clearTimeout):
-				cm.Clear()
+				_ = cm.Clear()
 			case <-ctx.Done():
 			}
 		}()

@@ -22,8 +22,8 @@ var _ = Describe("Editor", func() {
 	Describe("getEditor preference order", func() {
 		BeforeEach(func() {
 			// Start every test from a known empty state.
-			os.Unsetenv("EDITOR")
-			os.Unsetenv("VISUAL")
+			_ = os.Unsetenv("EDITOR")
+			_ = os.Unsetenv("VISUAL")
 		})
 
 		It("uses PreferredEditor when set, even if EDITOR/VISUAL exist", func() {
@@ -35,13 +35,13 @@ var _ = Describe("Editor", func() {
 
 		It("falls back to EDITOR when PreferredEditor is empty", func() {
 			testutil.SetEnv(GinkgoT(), "EDITOR", "vim")
-			os.Unsetenv("VISUAL")
+			_ = os.Unsetenv("VISUAL")
 			e := NewEditor(EditorConfig{})
 			Expect(e.getEditor()).To(Equal("vim"))
 		})
 
 		It("falls back to VISUAL when EDITOR is unset", func() {
-			os.Unsetenv("EDITOR")
+			_ = os.Unsetenv("EDITOR")
 			testutil.SetEnv(GinkgoT(), "VISUAL", "code --wait")
 			e := NewEditor(EditorConfig{})
 			Expect(e.getEditor()).To(Equal("code --wait"))
@@ -90,8 +90,8 @@ var _ = Describe("Editor", func() {
 
 	Describe("GetEditorName", func() {
 		BeforeEach(func() {
-			os.Unsetenv("EDITOR")
-			os.Unsetenv("VISUAL")
+			_ = os.Unsetenv("EDITOR")
+			_ = os.Unsetenv("VISUAL")
 		})
 
 		It("strips path components and command-line args", func() {
