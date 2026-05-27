@@ -2,100 +2,110 @@ package util
 
 import (
 	"os"
+	"os/exec"
 	"runtime"
-	"testing"
 
-	"github.com/stretchr/testify/assert"
+	. "github.com/onsi/ginkgo/v2"
+	. "github.com/onsi/gomega"
 	"github.com/yachiko/clerk/internal/testutil"
 )
 
-func TestNewEditor(t *testing.T) {
-	e := NewEditor(EditorConfig{PreferredEditor: "nvim"})
-	assert.NotNil(t, e)
-	assert.Equal(t, "nvim", e.config.PreferredEditor)
-}
-
-func TestEditor_getEditor_PreferenceOrder(t *testing.T) {
-	// Strip both env vars so the test starts from a clean slate.
-	os.Unsetenv("EDITOR")
-	os.Unsetenv("VISUAL")
-
-	t.Run("explicit preferred wins over env", func(t *testing.T) {
-		testutil.SetEnv(t, "EDITOR", "vim")
-		testutil.SetEnv(t, "VISUAL", "code")
-		e := NewEditor(EditorConfig{PreferredEditor: "nano"})
-		assert.Equal(t, "nano", e.getEditor())
+var _ = Describe("Editor", func() {
+	Describe("NewEditor", func() {
+		It("stores the supplied config", func() {
+			e := NewEditor(EditorConfig{PreferredEditor: "nvim"})
+			Expect(e).NotTo(BeNil())
+			Expect(e.config.PreferredEditor).To(Equal("nvim"))
+		})
 	})
 
-	t.Run("EDITOR env honored when no preferred", func(t *testing.T) {
-		testutil.SetEnv(t, "EDITOR", "vim")
-		os.Unsetenv("VISUAL")
-		e := NewEditor(EditorConfig{})
-		assert.Equal(t, "vim", e.getEditor())
+	Describe("getEditor preference order", func() {
+		BeforeEach(func() {
+			// Start every test from a known empty state.
+			os.Unsetenv("EDITOR")
+			os.Unsetenv("VISUAL")
+		})
+
+		It("uses PreferredEditor when set, even if EDITOR/VISUAL exist", func() {
+			testutil.SetEnv(GinkgoT(), "EDITOR", "vim")
+			testutil.SetEnv(GinkgoT(), "VISUAL", "code")
+			e := NewEditor(EditorConfig{PreferredEditor: "nano"})
+			Expect(e.getEditor()).To(Equal("nano"))
+		})
+
+		It("falls back to EDITOR when PreferredEditor is empty", func() {
+			testutil.SetEnv(GinkgoT(), "EDITOR", "vim")
+			os.Unsetenv("VISUAL")
+			e := NewEditor(EditorConfig{})
+			Expect(e.getEditor()).To(Equal("vim"))
+		})
+
+		It("falls back to VISUAL when EDITOR is unset", func() {
+			os.Unsetenv("EDITOR")
+			testutil.SetEnv(GinkgoT(), "VISUAL", "code --wait")
+			e := NewEditor(EditorConfig{})
+			Expect(e.getEditor()).To(Equal("code --wait"))
+		})
 	})
 
-	t.Run("VISUAL falls through when EDITOR unset", func(t *testing.T) {
-		os.Unsetenv("EDITOR")
-		testutil.SetEnv(t, "VISUAL", "code --wait")
-		e := NewEditor(EditorConfig{})
-		assert.Equal(t, "code --wait", e.getEditor())
-	})
-}
+	Describe("createSecureTempFile + secureDelete", func() {
+		It("creates a 0600 file and removes it on secureDelete", func() {
+			tmp := testutil.TempDir(GinkgoT())
+			e := NewEditor(EditorConfig{TempDir: tmp})
 
-func TestEditor_TempFile_CreateAndSecureDelete(t *testing.T) {
-	tmp := testutil.TempDir(t)
-	e := NewEditor(EditorConfig{TempDir: tmp})
+			path, err := e.createSecureTempFile("hello world", ".txt")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(path).To(BeAnExistingFile())
 
-	path, err := e.createSecureTempFile("hello world", ".txt")
-	if err != nil {
-		t.Fatalf("createSecureTempFile: %v", err)
-	}
-	assert.FileExists(t, path)
-	info, err := os.Stat(path)
-	if err != nil {
-		t.Fatalf("stat: %v", err)
-	}
-	assert.Equal(t, os.FileMode(0600), info.Mode().Perm())
+			info, err := os.Stat(path)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(info.Mode().Perm()).To(Equal(os.FileMode(0600)))
 
-	// secureDelete should remove the file.
-	if err := e.secureDelete(path); err != nil {
-		t.Fatalf("secureDelete: %v", err)
-	}
-	_, err = os.Stat(path)
-	assert.True(t, os.IsNotExist(err), "file must be gone after secureDelete")
-}
-
-func TestEditor_Edit_RoundTripWithStubEditor(t *testing.T) {
-	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
-		t.Skip("relies on /bin/true existing on PATH")
-	}
-	tmp := testutil.TempDir(t)
-	// /bin/true exits 0 without modifying the file → Edit returns the original
-	// content unchanged.
-	e := NewEditor(EditorConfig{PreferredEditor: "/bin/true", TempDir: tmp})
-	got, err := e.Edit("payload", ".txt")
-	if err != nil {
-		t.Fatalf("Edit: %v", err)
-	}
-	assert.Equal(t, "payload", got)
-}
-
-func TestEditor_GetEditorName(t *testing.T) {
-	os.Unsetenv("EDITOR")
-	os.Unsetenv("VISUAL")
-
-	t.Run("strips path and args", func(t *testing.T) {
-		e := NewEditor(EditorConfig{PreferredEditor: "/usr/bin/nvim --headless"})
-		assert.Equal(t, "nvim", e.GetEditorName())
+			Expect(e.secureDelete(path)).To(Succeed())
+			_, err = os.Stat(path)
+			Expect(os.IsNotExist(err)).To(BeTrue())
+		})
 	})
 
-	t.Run("none when no editor available", func(t *testing.T) {
-		if runtime.GOOS != "linux" {
-			t.Skip("linux-only: fallback logic looks up nano/vi on PATH")
-		}
-		// Empty PATH ensures the linux fallback (nano/vi LookPath) finds nothing.
-		testutil.SetEnv(t, "PATH", "")
-		e := NewEditor(EditorConfig{})
-		assert.Equal(t, "none", e.GetEditorName())
+	Describe("Edit (round-trip with a no-op editor)", func() {
+		// Use PATH lookup rather than a hardcoded /bin/true so the test runs on
+		// any unix-y system that ships a `true` binary somewhere on PATH.
+		It("returns the original content when the editor exits 0 without writing", func() {
+			if runtime.GOOS == "windows" {
+				Skip("relies on a unix 'true' binary on PATH")
+			}
+			truePath, err := exec.LookPath("true")
+			if err != nil {
+				Skip("no 'true' binary on PATH")
+			}
+
+			tmp := testutil.TempDir(GinkgoT())
+			e := NewEditor(EditorConfig{PreferredEditor: truePath, TempDir: tmp})
+
+			got, err := e.Edit("payload", ".txt")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(got).To(Equal("payload"))
+		})
 	})
-}
+
+	Describe("GetEditorName", func() {
+		BeforeEach(func() {
+			os.Unsetenv("EDITOR")
+			os.Unsetenv("VISUAL")
+		})
+
+		It("strips path components and command-line args", func() {
+			e := NewEditor(EditorConfig{PreferredEditor: "/usr/bin/nvim --headless"})
+			Expect(e.GetEditorName()).To(Equal("nvim"))
+		})
+
+		It("reports 'none' when no editor is configured and PATH yields nothing", func() {
+			if runtime.GOOS != "linux" {
+				Skip("linux-only: fallback logic looks up nano/vi on PATH")
+			}
+			testutil.SetEnv(GinkgoT(), "PATH", "")
+			e := NewEditor(EditorConfig{})
+			Expect(e.GetEditorName()).To(Equal("none"))
+		})
+	})
+})

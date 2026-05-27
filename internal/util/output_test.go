@@ -3,83 +3,77 @@ package util
 import (
 	"bytes"
 	"encoding/json"
-	"testing"
 
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
+	. "github.com/onsi/ginkgo/v2"
+	. "github.com/onsi/gomega"
 )
 
-func TestMaskValue(t *testing.T) {
-	tests := []struct {
-		name  string
-		input string
-		want  string
-	}{
-		{"empty", "", ""},
-		{"two", "ab", "**"},
-		{"eight (fully masked)", "12345678", "********"},
-		{"nine (partial)", "123456789", "12*****89"},
-		{"long", "verylongsecretvalue", "ve***************ue"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := MaskValue(tt.input)
-			assert.Equal(t, tt.want, got)
+var _ = Describe("MaskValue", func() {
+	DescribeTable("masks per length",
+		func(input, want string) {
+			Expect(MaskValue(input)).To(Equal(want))
+		},
+		Entry("empty stays empty", "", ""),
+		Entry("two chars are fully masked", "ab", "**"),
+		Entry("8 chars are fully masked (boundary)", "12345678", "********"),
+		Entry("9+ chars keep first/last two", "123456789", "12*****89"),
+		Entry("long values preserve first/last two", "verylongsecretvalue", "ve***************ue"),
+	)
+})
+
+var _ = Describe("MaskValueFull", func() {
+	It("returns asterisks of the same length", func() {
+		Expect(MaskValueFull("")).To(BeEmpty())
+		Expect(MaskValueFull("hello")).To(Equal("*****"))
+		Expect(MaskValueFull("12345678")).To(Equal("********"))
+	})
+})
+
+var _ = Describe("Formatter", func() {
+	Describe("NewFormatter", func() {
+		It("falls back to plain for unrecognized format strings", func() {
+			f := NewFormatter("unrecognized", &bytes.Buffer{})
+			Expect(f.format).To(Equal(OutputPlain))
 		})
-	}
-}
+		It("accepts JSON case-insensitively", func() {
+			f := NewFormatter("JSON", &bytes.Buffer{})
+			Expect(f.format).To(Equal(OutputJSON))
+		})
+		It("accepts plain explicitly", func() {
+			f := NewFormatter("plain", &bytes.Buffer{})
+			Expect(f.format).To(Equal(OutputPlain))
+		})
+	})
 
-func TestMaskValueFull(t *testing.T) {
-	assert.Equal(t, "", MaskValueFull(""))
-	assert.Equal(t, "*****", MaskValueFull("hello"))
-	assert.Equal(t, "********", MaskValueFull("12345678"))
-}
+	Describe("Print", func() {
+		It("emits valid indented JSON in JSON mode", func() {
+			var buf bytes.Buffer
+			f := NewFormatter("json", &buf)
+			Expect(f.Print(map[string]any{"name": "test", "value": 123})).To(Succeed())
 
-func TestFormatter_NewFormatter_DefaultsToPlain(t *testing.T) {
-	f := NewFormatter("unrecognized", &bytes.Buffer{})
-	assert.Equal(t, OutputPlain, f.format)
+			var decoded map[string]any
+			Expect(json.Unmarshal(buf.Bytes(), &decoded)).To(Succeed())
+			Expect(decoded).To(HaveKeyWithValue("name", "test"))
+			Expect(decoded).To(HaveKeyWithValue("value", BeNumerically("==", 123)))
+		})
 
-	f = NewFormatter("JSON", &bytes.Buffer{})
-	assert.Equal(t, OutputJSON, f.format)
+		It("emits a fmt.Println-style line in plain mode", func() {
+			var buf bytes.Buffer
+			f := NewFormatter("plain", &buf)
+			Expect(f.Print("hello")).To(Succeed())
+			Expect(buf.String()).To(Equal("hello\n"))
+		})
+	})
 
-	f = NewFormatter("plain", &bytes.Buffer{})
-	assert.Equal(t, OutputPlain, f.format)
-}
-
-func TestFormatter_Print_JSON(t *testing.T) {
-	var buf bytes.Buffer
-	f := NewFormatter("json", &buf)
-
-	data := map[string]any{"name": "test", "value": 123}
-	require.NoError(t, f.Print(data))
-
-	// Output must be valid JSON containing both fields.
-	var decoded map[string]any
-	require.NoError(t, json.Unmarshal(buf.Bytes(), &decoded))
-	assert.Equal(t, "test", decoded["name"])
-	assert.EqualValues(t, 123, decoded["value"])
-}
-
-func TestFormatter_Print_Plain(t *testing.T) {
-	var buf bytes.Buffer
-	f := NewFormatter("plain", &buf)
-
-	require.NoError(t, f.Print("hello"))
-	assert.Equal(t, "hello\n", buf.String())
-}
-
-func TestFormatter_StyledHelpers_SuppressedInJSON(t *testing.T) {
-	// In JSON mode, the colored helpers must write nothing — they would corrupt
-	// the JSON stream otherwise. They use stdout directly via fatih/color, so we
-	// can only assert that the call returns without panic and that the buffer is
-	// untouched.
-	var buf bytes.Buffer
-	f := NewFormatter("json", &buf)
-
-	f.PrintSuccess("ok %s", "yes")
-	f.PrintError("nope %d", 1)
-	f.PrintWarning("watch")
-	f.PrintInfo("fyi")
-
-	assert.Empty(t, buf.Bytes())
-}
+	Describe("styled helpers", func() {
+		It("are silent in JSON mode so they don't corrupt the stream", func() {
+			var buf bytes.Buffer
+			f := NewFormatter("json", &buf)
+			f.PrintSuccess("ok %s", "yes")
+			f.PrintError("nope %d", 1)
+			f.PrintWarning("watch")
+			f.PrintInfo("fyi")
+			Expect(buf.Bytes()).To(BeEmpty())
+		})
+	})
+})

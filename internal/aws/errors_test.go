@@ -3,63 +3,45 @@ package aws
 import (
 	"errors"
 	"fmt"
-	"testing"
 
 	"github.com/aws/aws-sdk-go-v2/service/ssm/types"
-	"github.com/stretchr/testify/assert"
+	. "github.com/onsi/ginkgo/v2"
+	. "github.com/onsi/gomega"
 )
 
-func TestIsParameterNotFoundError(t *testing.T) {
-	tests := []struct {
-		name string
-		err  error
-		want bool
-	}{
-		{"nil", nil, false},
-		{"generic", errors.New("boom"), false},
-		{"typed direct", &types.ParameterNotFound{}, true},
-		{"typed wrapped", fmt.Errorf("get failed: %w", &types.ParameterNotFound{}), true},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, tt.want, IsParameterNotFoundError(tt.err))
-		})
-	}
-}
+var _ = Describe("IsParameterNotFoundError", func() {
+	DescribeTable("classifies errors",
+		func(err error, want bool) {
+			Expect(IsParameterNotFoundError(err)).To(Equal(want))
+		},
+		Entry("nil → false", nil, false),
+		Entry("generic error → false", errors.New("boom"), false),
+		Entry("typed ParameterNotFound → true", &types.ParameterNotFound{}, true),
+		Entry("wrapped ParameterNotFound → true", fmt.Errorf("get failed: %w", &types.ParameterNotFound{}), true),
+	)
+})
 
-func TestIsParameterAlreadyExistsError(t *testing.T) {
-	tests := []struct {
-		name string
-		err  error
-		want bool
-	}{
-		{"nil", nil, false},
-		{"generic", errors.New("boom"), false},
-		{"typed direct", &types.ParameterAlreadyExists{}, true},
-		{"typed wrapped", fmt.Errorf("put failed: %w", &types.ParameterAlreadyExists{}), true},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, tt.want, IsParameterAlreadyExistsError(tt.err))
-		})
-	}
-}
+var _ = Describe("IsParameterAlreadyExistsError", func() {
+	DescribeTable("classifies errors",
+		func(err error, want bool) {
+			Expect(IsParameterAlreadyExistsError(err)).To(Equal(want))
+		},
+		Entry("nil → false", nil, false),
+		Entry("generic error → false", errors.New("boom"), false),
+		Entry("typed ParameterAlreadyExists → true", &types.ParameterAlreadyExists{}, true),
+		Entry("wrapped ParameterAlreadyExists → true", fmt.Errorf("put failed: %w", &types.ParameterAlreadyExists{}), true),
+	)
+})
 
-func TestIsAccessDeniedError(t *testing.T) {
-	tests := []struct {
-		name string
-		err  error
-		want bool
-	}{
-		{"nil", nil, false},
-		{"generic", errors.New("boom"), false},
-		{"access denied", errors.New("AccessDeniedException: ..."), true},
-		{"unauthorized", errors.New("UnauthorizedAccess: ..."), true},
-		{"wrapped access denied", fmt.Errorf("rpc: %w", errors.New("AccessDenied")), true},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, tt.want, IsAccessDeniedError(tt.err))
-		})
-	}
-}
+var _ = Describe("IsAccessDeniedError", func() {
+	DescribeTable("classifies errors by message substring",
+		func(err error, want bool) {
+			Expect(IsAccessDeniedError(err)).To(Equal(want))
+		},
+		Entry("nil → false", nil, false),
+		Entry("unrelated error → false", errors.New("boom"), false),
+		Entry("AccessDeniedException → true", errors.New("AccessDeniedException: ..."), true),
+		Entry("UnauthorizedAccess → true", errors.New("UnauthorizedAccess: ..."), true),
+		Entry("wrapped AccessDenied → true", fmt.Errorf("rpc: %w", errors.New("AccessDenied")), true),
+	)
+})
