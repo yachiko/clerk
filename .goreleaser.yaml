@@ -43,6 +43,33 @@ archives:
       - README.md
       - CHANGELOG.md
 
+# Publish a Homebrew formula to yachiko/homebrew-tap on every stable release.
+# Token is minted per-run from the yachiko-homebrew-bot GitHub App in the
+# release workflow; skip_upload:auto keeps prereleases out of the tap.
+brews:
+  - name: clerk
+    repository:
+      owner: yachiko
+      name: homebrew-tap
+      branch: main
+      token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
+    directory: Formula
+    # After creating the yachiko-homebrew-bot App, set commit_author so tap
+    # commits are attributed correctly. Email format is:
+    #   <APP_ID>+yachiko-homebrew-bot[bot]@users.noreply.github.com
+    # commit_author:
+    #   name: yachiko-homebrew-bot[bot]
+    #   email: <APP_ID>+yachiko-homebrew-bot[bot]@users.noreply.github.com
+    commit_msg_template: "{{ .ProjectName }} {{ .Tag }}"
+    homepage: "https://github.com/yachiko/clerk"
+    description: "CLI for managing AWS Parameter Store secrets with a terminal UI"
+    license: "MIT"
+    skip_upload: auto
+    install: |
+      bin.install "clerk"
+    test: |
+      system "#{bin}/clerk", "--version"
+
 checksum:
   name_template: "checksums.txt"
 
