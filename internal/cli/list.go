@@ -216,15 +216,15 @@ func outputList(entries []cache.CacheEntry, sortBy string) error {
 	}
 
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(w, "NAME\tTYPE\tVERSION\tMODIFIED")
-	fmt.Fprintln(w, strings.Repeat("-", 70))
+	_, _ = fmt.Fprintln(w, "NAME\tTYPE\tVERSION\tMODIFIED")
+	_, _ = fmt.Fprintln(w, strings.Repeat("-", 70))
 
 	for _, entry := range entries {
 		modified := entry.LastModifiedDate.Format("2006-01-02 15:04")
-		fmt.Fprintf(w, "%s\t%s\t%d\t%s\n", entry.Name, entry.Type, entry.Version, modified)
+		_, _ = fmt.Fprintf(w, "%s\t%s\t%d\t%s\n", entry.Name, entry.Type, entry.Version, modified)
 	}
 
-	w.Flush()
+	_ = w.Flush()
 
 	fmt.Fprintf(os.Stderr, "\nTotal: %d parameters\n", len(entries))
 	return nil
