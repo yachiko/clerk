@@ -4,11 +4,19 @@ package testutil
 import (
 	"os"
 	"path/filepath"
-	"testing"
 )
 
+// T is the minimal subset of *testing.T / ginkgo.GinkgoT() that the helpers
+// rely on. We can't use T directly because it has a sealed private()
+// method that GinkgoT()'s return type doesn't satisfy.
+type T interface {
+	Helper()
+	Cleanup(func())
+	Fatalf(format string, args ...any)
+}
+
 // TempDir creates a temporary directory for tests and registers automatic cleanup.
-func TempDir(t *testing.T) string {
+func TempDir(t T) string {
 	t.Helper()
 	dir, err := os.MkdirTemp("", "clerk-test-*")
 	if err != nil {
@@ -19,7 +27,7 @@ func TempDir(t *testing.T) string {
 }
 
 // TempFile writes content to a file inside dir and returns its path.
-func TempFile(t *testing.T, dir, name, content string) string {
+func TempFile(t T, dir, name, content string) string {
 	t.Helper()
 	path := filepath.Join(dir, name)
 	if err := os.WriteFile(path, []byte(content), 0600); err != nil {
@@ -30,7 +38,7 @@ func TempFile(t *testing.T, dir, name, content string) string {
 
 // SetEnv sets an environment variable for the duration of the test and
 // restores the prior value on cleanup.
-func SetEnv(t *testing.T, key, value string) {
+func SetEnv(t T, key, value string) {
 	t.Helper()
 	old, existed := os.LookupEnv(key)
 	if err := os.Setenv(key, value); err != nil {
@@ -47,7 +55,7 @@ func SetEnv(t *testing.T, key, value string) {
 
 // IsolateHome points HOME at a fresh temp directory so config/cache writes
 // don't touch the real user home. Returns the temp dir.
-func IsolateHome(t *testing.T) string {
+func IsolateHome(t T) string {
 	t.Helper()
 	dir := TempDir(t)
 	SetEnv(t, "HOME", dir)
