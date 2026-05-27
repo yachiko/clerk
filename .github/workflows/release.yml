@@ -1,0 +1,62 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  goreleaser:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # write release notes + upload archives
+      id-token: write   # keyless cosign signing via OIDC
+    outputs:
+      hashes: ${{ steps.hash.outputs.hashes }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c  # v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - uses: sigstore/cosign-installer@f713795cb21599bc4e5c4b58cbad1da852d7eeb9  # v3
+
+      - uses: goreleaser/goreleaser-action@e435ccd777264be153ace6237001ef4d979d3a7a  # v6
+        with:
+          distribution: goreleaser
+          version: "~> v2"
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Capture artifact hashes for provenance
+        id: hash
+        # Base64-encoded sha256 digests of every release archive + checksums
+        # file. Fed to the slsa-github-generator reusable workflow below.
+        run: |
+          cd dist
+          {
+            sha256sum *.tar.gz 2>/dev/null
+            sha256sum *.zip    2>/dev/null
+            sha256sum checksums.txt
+          } | base64 -w0 > hashes.b64
+          echo "hashes=$(cat hashes.b64)" >> "$GITHUB_OUTPUT"
+
+  provenance:
+    needs: goreleaser
+    permissions:
+      actions: read     # detect the workflow's run details
+      id-token: write   # mint OIDC tokens to sign provenance
+      contents: write   # attach the .intoto.jsonl asset to the release
+    # Reusable workflow MUST be referenced by tag (not SHA) per SLSA rules.
+    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_generic_slsa3.yml@v2.1.0
+    with:
+      base64-subjects: ${{ needs.goreleaser.outputs.hashes }}
+      upload-assets: true

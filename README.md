@@ -5,6 +5,13 @@
 <h1 align="center">Clerk</h1>
 <p align="center"><strong>Tool for managing secrets in AWS Parameter Store with an interactive terminal UI</strong></p>
 
+<p align="center">
+  <a href="https://github.com/yachiko/clerk/actions/workflows/ci.yml"><img src="https://github.com/yachiko/clerk/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://github.com/yachiko/clerk/releases"><img src="https://img.shields.io/github/v/release/yachiko/clerk" alt="Release"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/yachiko/clerk" alt="License"></a>
+  <a href="go.mod"><img src="https://img.shields.io/github/go-mod/go-version/yachiko/clerk" alt="Go version"></a>
+</p>
+
 --- 
 
 ## Features
