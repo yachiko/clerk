@@ -2,54 +2,48 @@ package util
 
 import (
 	"sync/atomic"
-	"testing"
 
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
+	. "github.com/onsi/ginkgo/v2"
+	. "github.com/onsi/gomega"
 )
 
-func TestNewSignalHandler_ContextInitiallyOpen(t *testing.T) {
-	sh := NewSignalHandler()
-	require.NotNil(t, sh)
+var _ = Describe("SignalHandler", func() {
+	Describe("NewSignalHandler", func() {
+		It("returns a handler whose Context is not yet cancelled", func() {
+			sh := NewSignalHandler()
+			Expect(sh).NotTo(BeNil())
 
-	ctx := sh.Context()
-	require.NotNil(t, ctx)
+			ctx := sh.Context()
+			Expect(ctx).NotTo(BeNil())
 
-	select {
-	case <-ctx.Done():
-		t.Fatal("context should not be done before any signal or cleanup")
-	default:
-	}
-}
-
-func TestSignalHandler_Cleanup_RunsRegisteredFuncs_InLIFOOrder(t *testing.T) {
-	sh := NewSignalHandler()
-
-	var order []int
-	var calls int32
-	sh.RegisterCleanup(func() {
-		atomic.AddInt32(&calls, 1)
-		order = append(order, 1)
-	})
-	sh.RegisterCleanup(func() {
-		atomic.AddInt32(&calls, 1)
-		order = append(order, 2)
-	})
-	sh.RegisterCleanup(func() {
-		atomic.AddInt32(&calls, 1)
-		order = append(order, 3)
+			select {
+			case <-ctx.Done():
+				Fail("context should not be done before any signal or Cleanup")
+			default:
+			}
+		})
 	})
 
-	sh.Cleanup()
+	Describe("Cleanup", func() {
+		It("runs all registered cleanups in LIFO order and cancels the context", func() {
+			sh := NewSignalHandler()
 
-	assert.Equal(t, int32(3), atomic.LoadInt32(&calls))
-	// LIFO: last registered runs first
-	assert.Equal(t, []int{3, 2, 1}, order)
+			var calls int32
+			var order []int
+			sh.RegisterCleanup(func() { atomic.AddInt32(&calls, 1); order = append(order, 1) })
+			sh.RegisterCleanup(func() { atomic.AddInt32(&calls, 1); order = append(order, 2) })
+			sh.RegisterCleanup(func() { atomic.AddInt32(&calls, 1); order = append(order, 3) })
 
-	// Context is cancelled after cleanup.
-	select {
-	case <-sh.Context().Done():
-	default:
-		t.Fatal("context should be done after Cleanup()")
-	}
-}
+			sh.Cleanup()
+
+			Expect(atomic.LoadInt32(&calls)).To(Equal(int32(3)))
+			Expect(order).To(Equal([]int{3, 2, 1}), "cleanups must run in reverse-registration order")
+
+			select {
+			case <-sh.Context().Done():
+			default:
+				Fail("Cleanup() must cancel the context")
+			}
+		})
+	})
+})

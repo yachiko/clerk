@@ -11,9 +11,11 @@ import (
 	"github.com/yachiko/clerk/internal/testutil"
 )
 
-// benchmarkSetup is the b.Helper equivalent of setupTest. Because benchmarks
-// don't have testing.T, we accept a *testing.B and skip via b.Skip.
-func benchmarkSetup(b *testing.B) (*testutil.IntegrationTestConfig, string) {
+// Benchmarks stay as standard Go benchmarks. Ginkgo's spec runner doesn't
+// drive `testing.B`, so these are reached via `go test -bench=. -tags=integration`.
+
+// bSetup prepares a moto-connected fixture for a single benchmark.
+func bSetup(b *testing.B) (*testutil.IntegrationTestConfig, string) {
 	b.Helper()
 	cfg := testutil.DefaultIntegrationConfig()
 	if !testutil.IsMotoAvailable(cfg.MotoEndpoint) {
@@ -23,13 +25,9 @@ func benchmarkSetup(b *testing.B) (*testutil.IntegrationTestConfig, string) {
 		b.Fatalf("reset moto: %v", err)
 	}
 
-	// Build clerk via the same once-only helper. The helper takes *testing.T,
-	// so we adapt with a tiny shim.
-	t := &testing.T{}
-	testutil.BuildClerk(t)
-	if t.Failed() {
-		b.Fatal("failed to build clerk")
-	}
+	// BuildClerk takes our minimal T interface; *testing.B satisfies it via
+	// its standard Helper/Cleanup/Fatalf methods.
+	testutil.BuildClerk(b)
 
 	home, err := os.MkdirTemp("", "clerk-bench-home-*")
 	if err != nil {
@@ -40,7 +38,7 @@ func benchmarkSetup(b *testing.B) (*testutil.IntegrationTestConfig, string) {
 }
 
 func BenchmarkIntegration_Get(b *testing.B) {
-	cfg, home := benchmarkSetup(b)
+	cfg, home := bSetup(b)
 	ctx := context.Background()
 
 	if _, _, err := testutil.RunClerkInHome(ctx, cfg, home, "put", "/bench/get/param", "v", "--type", "String"); err != nil {
@@ -56,7 +54,7 @@ func BenchmarkIntegration_Get(b *testing.B) {
 }
 
 func BenchmarkIntegration_Put(b *testing.B) {
-	cfg, home := benchmarkSetup(b)
+	cfg, home := bSetup(b)
 	ctx := context.Background()
 
 	b.ResetTimer()
@@ -69,7 +67,7 @@ func BenchmarkIntegration_Put(b *testing.B) {
 }
 
 func BenchmarkIntegration_List(b *testing.B) {
-	cfg, home := benchmarkSetup(b)
+	cfg, home := bSetup(b)
 	ctx := context.Background()
 
 	fixtureCfg := testutil.DefaultFixtureConfig()
@@ -93,7 +91,7 @@ func BenchmarkIntegration_List(b *testing.B) {
 }
 
 func BenchmarkIntegration_Refresh(b *testing.B) {
-	cfg, home := benchmarkSetup(b)
+	cfg, home := bSetup(b)
 	ctx := context.Background()
 
 	fixtureCfg := testutil.DefaultFixtureConfig()

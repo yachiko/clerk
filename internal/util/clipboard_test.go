@@ -2,46 +2,51 @@ package util
 
 import (
 	"strings"
-	"testing"
 	"time"
 
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
+	. "github.com/onsi/ginkgo/v2"
+	. "github.com/onsi/gomega"
 )
 
-func TestNewClipboardManager(t *testing.T) {
-	cm := NewClipboardManager(30 * time.Second)
-	require.NotNil(t, cm)
-	assert.Equal(t, 30*time.Second, cm.clearTimeout)
-}
-
-func TestIsClipboardSupported_DoesNotPanic(t *testing.T) {
-	// In headless CI the answer is "false"; locally it may be true. Either is
-	// acceptable — we just verify the call returns a bool without panicking.
-	_ = IsClipboardSupported()
-}
-
-func TestClipboardManager_CopyWithMessage(t *testing.T) {
-	if !IsClipboardSupported() {
-		t.Skip("clipboard not supported in this environment")
-	}
-
-	t.Run("with timeout", func(t *testing.T) {
-		cm := NewClipboardManager(30 * time.Second)
-		msg, err := cm.CopyWithMessage("test-value")
-		if err != nil {
-			t.Skipf("clipboard write failed (likely no display): %v", err)
-		}
-		assert.True(t, strings.HasPrefix(msg, "Copied to clipboard"))
-		assert.Contains(t, msg, "30s")
+var _ = Describe("ClipboardManager", func() {
+	Describe("NewClipboardManager", func() {
+		It("stores the clearTimeout it was given", func() {
+			cm := NewClipboardManager(30 * time.Second)
+			Expect(cm).NotTo(BeNil())
+			Expect(cm.clearTimeout).To(Equal(30 * time.Second))
+		})
 	})
 
-	t.Run("no timeout", func(t *testing.T) {
-		cm := NewClipboardManager(0)
-		msg, err := cm.CopyWithMessage("test-value")
-		if err != nil {
-			t.Skipf("clipboard write failed: %v", err)
-		}
-		assert.Equal(t, "Copied to clipboard", msg)
+	Describe("IsClipboardSupported", func() {
+		It("returns a bool without panicking (env-dependent value)", func() {
+			Expect(func() { _ = IsClipboardSupported() }).NotTo(Panic())
+		})
 	})
-}
+
+	Describe("CopyWithMessage", func() {
+		BeforeEach(func() {
+			if !IsClipboardSupported() {
+				Skip("clipboard not supported in this environment")
+			}
+		})
+
+		It("returns a message that mentions the timeout when one is set", func() {
+			cm := NewClipboardManager(30 * time.Second)
+			msg, err := cm.CopyWithMessage("test-value")
+			if err != nil {
+				Skip("clipboard write failed (likely no display): " + err.Error())
+			}
+			Expect(strings.HasPrefix(msg, "Copied to clipboard")).To(BeTrue())
+			Expect(msg).To(ContainSubstring("30s"))
+		})
+
+		It("returns a plain message when no timeout is set", func() {
+			cm := NewClipboardManager(0)
+			msg, err := cm.CopyWithMessage("test-value")
+			if err != nil {
+				Skip("clipboard write failed: " + err.Error())
+			}
+			Expect(msg).To(Equal("Copied to clipboard"))
+		})
+	})
+})
