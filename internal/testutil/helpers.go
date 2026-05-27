@@ -22,7 +22,7 @@ func TempDir(t T) string {
 	if err != nil {
 		t.Fatalf("failed to create temp dir: %v", err)
 	}
-	t.Cleanup(func() { os.RemoveAll(dir) })
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
 	return dir
 }
 
@@ -46,9 +46,9 @@ func SetEnv(t T, key, value string) {
 	}
 	t.Cleanup(func() {
 		if existed {
-			os.Setenv(key, old)
+			_ = os.Setenv(key, old)
 		} else {
-			os.Unsetenv(key)
+			_ = os.Unsetenv(key)
 		}
 	})
 }

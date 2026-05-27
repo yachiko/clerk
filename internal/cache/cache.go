@@ -96,13 +96,13 @@ func (m *Manager) acquireLock() error {
 	for i := 0; i < 10; i++ {
 		f, err := os.OpenFile(m.lockFile, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
 		if err == nil {
-			f.Close()
+			_ = f.Close()
 			return nil
 		}
 		if os.IsExist(err) {
 			info, statErr := os.Stat(m.lockFile)
 			if statErr == nil && time.Since(info.ModTime()) > 5*time.Minute {
-				os.Remove(m.lockFile)
+				_ = os.Remove(m.lockFile)
 				continue
 			}
 			time.Sleep(100 * time.Millisecond)
@@ -113,9 +113,11 @@ func (m *Manager) acquireLock() error {
 	return fmt.Errorf("failed to acquire lock after retries")
 }
 
-// releaseLock removes the lock file
+// releaseLock removes the lock file. Errors are ignored: a missing lock
+// file on unlock means someone else cleaned up (eg stale-lock reclaim),
+// which is fine — we just want it gone.
 func (m *Manager) releaseLock() {
-	os.Remove(m.lockFile)
+	_ = os.Remove(m.lockFile)
 }
 
 // IsExpired checks if the cache is expired
