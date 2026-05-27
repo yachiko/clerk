@@ -1,3 +1,5 @@
+version: 2
+
 project_name: clerk
 
 before:
@@ -5,7 +7,8 @@ before:
     - go mod tidy
 
 builds:
-  - main: ./cmd/clerk
+  - id: clerk
+    main: ./cmd/clerk
     binary: clerk
     env:
       - CGO_ENABLED=0
@@ -16,37 +19,63 @@ builds:
     goarch:
       - amd64
       - arm64
-    ldflags:
-      - -s -w
-      - -X main.Version={{.Version}}
-      - -X main.Commit={{.ShortCommit}}
-      - -X main.BuildTime={{.Date}}
     ignore:
       - goos: windows
         goarch: arm64
+    ldflags:
+      - -s -w
+      - -X main.Version={{ .Version }}
+      - -X main.Commit={{ .ShortCommit }}
+      - -X main.BuildTime={{ .Date }}
 
 archives:
-  - format: tar.gz
-    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+  - id: clerk
+    name_template: >-
+      {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
+    formats:
+      - tar.gz
     format_overrides:
       - goos: windows
-        format: zip
+        formats:
+          - zip
     files:
       - LICENSE
       - README.md
       - CHANGELOG.md
 
 checksum:
-  name_template: 'checksums.txt'
+  name_template: "checksums.txt"
+
+# Keyless cosign signing of the checksums file. Produces a .pem
+# certificate and a .sig signature alongside checksums.txt. Verifiable
+# against the Rekor transparency log without needing a managed key.
+# Requires `id-token: write` permission on the release workflow.
+signs:
+  - cmd: cosign
+    artifacts: checksum
+    output: true
+    certificate: "${artifact}.pem"
+    args:
+      - "sign-blob"
+      - "--yes"
+      - "--output-certificate=${certificate}"
+      - "--output-signature=${signature}"
+      - "${artifact}"
 
 snapshot:
-  name_template: "{{ incpatch .Version }}-next"
+  version_template: "{{ incpatch .Version }}-next"
 
 changelog:
   sort: asc
   filters:
     exclude:
-      - '^docs:'
-      - '^test:'
-      - '^chore:'
-      - '^ci:'
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
+      - "^ci:"
+      - "Merge pull request"
+      - "Merge branch"
+
+release:
+  draft: false
+  prerelease: auto
