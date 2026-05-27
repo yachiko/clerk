@@ -57,7 +57,7 @@ Every tagged release ships:
 
 - Platform archives (`.tar.gz` / `.zip`) for linux/darwin × amd64/arm64 and windows/amd64.
 - A `checksums.txt` listing the SHA-256 of every archive.
-- A keyless [cosign](https://github.com/sigstore/cosign) signature of `checksums.txt` (`checksums.txt.sig` + `checksums.txt.pem`), recorded in the Rekor transparency log.
+- A keyless [cosign](https://github.com/sigstore/cosign) bundle signature of `checksums.txt` (`checksums.txt.sigstore.json`, combining certificate + signature), recorded in the Rekor transparency log.
 - A [SLSA v1.0](https://slsa.dev/) build provenance attestation (`*.intoto.jsonl`) covering all artifacts.
 
 ### Verify with cosign
@@ -65,12 +65,10 @@ Every tagged release ships:
 ```bash
 TAG=v0.1.0   # adjust
 curl -sLO https://github.com/yachiko/clerk/releases/download/${TAG}/checksums.txt
-curl -sLO https://github.com/yachiko/clerk/releases/download/${TAG}/checksums.txt.sig
-curl -sLO https://github.com/yachiko/clerk/releases/download/${TAG}/checksums.txt.pem
+curl -sLO https://github.com/yachiko/clerk/releases/download/${TAG}/checksums.txt.sigstore.json
 
 cosign verify-blob \
-  --certificate checksums.txt.pem \
-  --signature checksums.txt.sig \
+  --bundle checksums.txt.sigstore.json \
   --certificate-identity-regexp "https://github.com/yachiko/clerk/" \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
   checksums.txt
