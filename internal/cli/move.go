@@ -102,7 +102,7 @@ func runMove(cmd *cobra.Command, args []string) error {
 		fmt.Print("Type 'move' to confirm: ")
 
 		var confirmation string
-		fmt.Scanln(&confirmation)
+		_, _ = fmt.Scanln(&confirmation)
 
 		if confirmation != "move" {
 			fmt.Println("Cancelled.")
@@ -141,11 +141,11 @@ func runMove(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to initialize cache: %w", err)
 	}
 
-	cacheMgr.Delete(source)
-	// Refresh cache entry for destination
+	// Cache mutations are best-effort — the next refresh reconciles.
+	_ = cacheMgr.Delete(source)
 	destParamRetrieved, err := client.GetParameter(ctx, destination, false)
 	if err == nil {
-		cacheMgr.Update(cache.CacheEntry{
+		_ = cacheMgr.Update(cache.CacheEntry{
 			Name:             destParamRetrieved.Name,
 			Type:             destParamRetrieved.Type,
 			Version:          destParamRetrieved.Version,
