@@ -80,21 +80,27 @@ homebrew_casks:
 checksum:
   name_template: "checksums.txt"
 
-# Keyless cosign signing of the checksums file. Produces a .pem
-# certificate and a .sig signature alongside checksums.txt. Verifiable
-# against the Rekor transparency log without needing a managed key.
+# Keyless cosign signing of the checksums file. Produces a single
+# .sigstore.json bundle (cert + signature combined) alongside checksums.txt.
+# Verifiable against the Rekor transparency log without needing a managed key.
 # Requires `id-token: write` permission on the release workflow.
+#
+# Verify with:
+#   cosign verify-blob \
+#     --bundle checksums.txt.sigstore.json \
+#     --certificate-identity-regexp 'https://github.com/yachiko/clerk/.github/workflows/release.yml@refs/tags/v.*' \
+#     --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+#     checksums.txt
 signs:
   - cmd: cosign
     artifacts: checksum
     output: true
-    certificate: "${artifact}.pem"
+    signature: "${artifact}.sigstore.json"
     args:
       - "sign-blob"
-      - "--yes"
-      - "--output-certificate=${certificate}"
-      - "--output-signature=${signature}"
+      - "--bundle=${signature}"
       - "${artifact}"
+      - "--yes"
 
 snapshot:
   version_template: "{{ incpatch .Version }}-next"
