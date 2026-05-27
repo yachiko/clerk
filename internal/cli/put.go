@@ -23,7 +23,7 @@ var (
 
 // InitPutCommand initializes the PUT command
 func InitPutCommand() *cobra.Command {
-	putCmd = &cobra.Command{
+	putCmd := &cobra.Command{
 		Use:   "put <name> <value|file>",
 		Short: "Create or update a secret in AWS Parameter Store",
 		Long: `Create a new secret or update an existing one in AWS Parameter Store.
