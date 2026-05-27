@@ -71,7 +71,7 @@ func InitConfigCommands(rootCmd *cobra.Command) {
 			bold := color.New(color.Bold)
 			for _, key := range mgr.ListKeys() {
 				value, _ := mgr.GetValue(key)
-				bold.Printf("%s: ", key)
+				_, _ = bold.Printf("%s: ", key)
 				fmt.Println(value)
 			}
 			return nil
