@@ -27,9 +27,15 @@
 
 ## Installation
 
+### Homebrew (macOS / Linux)
+
+```sh
+brew install yachiko/tap/clerk
+```
+
 ### Using Go
 
-```bash
+```sh
 go install github.com/yachiko/clerk/cmd/clerk@latest
 ```
 
@@ -37,18 +43,15 @@ go install github.com/yachiko/clerk/cmd/clerk@latest
 
 Download the latest release from the [releases page](https://github.com/yachiko/clerk/releases).
 
-```bash
+```sh
 # Linux/macOS
 tar -xzf clerk-linux-amd64.tar.gz
 sudo mv clerk-linux-amd64 /usr/local/bin/clerk
-
-# macOS with Homebrew (coming soon)
-brew install yachiko/tap/clerk
 ```
 
 ### From Source
 
-```bash
+```sh
 git clone https://github.com/yachiko/clerk.git
 cd clerk
 make install
