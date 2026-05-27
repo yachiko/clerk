@@ -10,7 +10,6 @@ import (
 	"runtime"
 	"strings"
 	"sync"
-	"testing"
 	"time"
 )
 
@@ -39,7 +38,14 @@ func DefaultIntegrationConfig() *IntegrationTestConfig {
 
 // SkipIfNoMoto is the entry point for every integration test: it short-circuits
 // the test if the moto endpoint isn't reachable.
-func SkipIfNoMoto(t *testing.T) {
+// skippableT extends our minimal T with Skipf, used only by SkipIfNoMoto.
+type skippableT interface {
+	T
+	Skipf(format string, args ...any)
+}
+
+// SkipIfNoMoto short-circuits the test if the moto endpoint isn't reachable.
+func SkipIfNoMoto(t skippableT) {
 	t.Helper()
 	cfg := DefaultIntegrationConfig()
 	if !IsMotoAvailable(cfg.MotoEndpoint) {
@@ -157,8 +163,9 @@ var (
 )
 
 // BuildClerk builds the clerk binary into bin/clerk once per test process.
-// Subsequent calls return the cached path.
-func BuildClerk(t *testing.T) string {
+// Subsequent calls return the cached path. Accepts our minimal T so it works
+// with *testing.T, *testing.B, and ginkgo.GinkgoT().
+func BuildClerk(t T) string {
 	t.Helper()
 	buildOnce.Do(func() {
 		root := repoRoot()
