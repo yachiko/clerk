@@ -151,16 +151,6 @@ func confirmDeletion(name string, param *aws.Parameter) (bool, error) {
 	return input == confirmWord, nil
 }
 
-// getConfirmationWord returns the word user must type to confirm
-func getConfirmationWord(name string) string {
-	parts := strings.Split(name, "/")
-	word := parts[len(parts)-1]
-	if len(word) > 10 {
-		word = word[:10]
-	}
-	return word
-}
-
 // outputDeleteResult outputs the deletion result
 func outputDeleteResult(name string, param *aws.Parameter) error {
 	if globalOpts.Output == "json" {
