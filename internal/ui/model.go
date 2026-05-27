@@ -315,7 +315,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// bubbletea v1.x deprecated msg.Type / tea.MouseWheelUp in favor of
 		// msg.Button / tea.MouseButtonWheelUp. Wheel events still arrive as
 		// MouseActionPress so we don't need to filter on action.
-		if m.state.Mode == ViewModeDescribe {
+		switch m.state.Mode {
+		case ViewModeDescribe:
 			// Describe view: scroll value vertically or horizontally
 			switch msg.Button {
 			case tea.MouseButtonWheelUp:
@@ -341,7 +342,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				return m, nil
 			}
-		} else if m.state.Mode == ViewModeList || m.state.Mode == ViewModeTree {
+		case ViewModeList, ViewModeTree:
 			// Browse view: scroll through entries
 			switch msg.Button {
 			case tea.MouseButtonWheelUp:
@@ -739,10 +740,11 @@ func (m Model) handleBrowseKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case "t":
 		// Toggle tree/list view
-		if m.state.Mode == ViewModeList {
+		switch m.state.Mode {
+		case ViewModeList:
 			m.state.Mode = ViewModeTree
 			m.buildTree()
-		} else if m.state.Mode == ViewModeTree {
+		case ViewModeTree:
 			m.state.Mode = ViewModeList
 		}
 		// Update PreviousMode when in browse mode (not describe)
@@ -1673,7 +1675,8 @@ func (m Model) handleConfirmKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case "enter":
 		// Handle different confirmation types
-		if m.state.Confirm.Action == "delete" {
+		switch m.state.Confirm.Action {
+		case "delete":
 			// For delete, check confirmation text
 			if m.state.Confirm.Input == m.state.Confirm.ConfirmText {
 				name := m.state.Confirm.Target
@@ -1682,7 +1685,7 @@ func (m Model) handleConfirmKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 			m.state.Confirm.ErrorMsg = "Incorrect confirmation text"
 			return m, nil
-		} else if m.state.Confirm.Action == "move" {
+		case "move":
 			// For move, target is the new name
 			if m.state.Confirm.Input == "" {
 				m.state.Confirm.ErrorMsg = "Target name cannot be empty"
@@ -1692,7 +1695,7 @@ func (m Model) handleConfirmKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			target := m.state.Confirm.Input
 			m.state.Confirm = ConfirmState{}
 			return m, m.moveSecret(source, target)
-		} else if m.state.Confirm.Action == "copy" {
+		case "copy":
 			// For copy, target is the new name
 			if m.state.Confirm.Input == "" {
 				m.state.Confirm.ErrorMsg = "Target name cannot be empty"
