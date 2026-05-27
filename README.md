@@ -1,6 +1,11 @@
-# Clerk
+<p align="center">
+  <img src="logo.png" alt="Clerk logo" width="170" />
+</p>
 
-A CLI tool for managing secrets in AWS Parameter Store with an interactive terminal UI.
+<h1 align="center">Clerk</h1>
+<p align="center"><strong>Tool for managing secrets in AWS Parameter Store with an interactive terminal UI</strong></p>
+
+--- 
 
 ## Features
 
