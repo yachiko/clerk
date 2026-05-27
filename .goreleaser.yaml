@@ -43,17 +43,20 @@ archives:
       - README.md
       - CHANGELOG.md
 
-# Publish a Homebrew formula to yachiko/homebrew-tap on every stable release.
+# Publish a Homebrew Cask to yachiko/homebrew-tap on every stable release.
+# Note: `brews:` was deprecated in GoReleaser v2.10 (hard in v2.16) in favor
+# of `homebrew_casks:`. Casks default to the `Casks/` directory in the tap.
 # Token is minted per-run from the yachiko-homebrew-bot GitHub App in the
 # release workflow; skip_upload:auto keeps prereleases out of the tap.
-brews:
+homebrew_casks:
   - name: clerk
+    binaries:
+      - clerk
     repository:
       owner: yachiko
       name: homebrew-tap
       branch: main
       token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
-    directory: Formula
     # After creating the yachiko-homebrew-bot App, set commit_author so tap
     # commits are attributed correctly. Email format is:
     #   <APP_ID>+yachiko-homebrew-bot[bot]@users.noreply.github.com
@@ -63,12 +66,16 @@ brews:
     commit_msg_template: "{{ .ProjectName }} {{ .Tag }}"
     homepage: "https://github.com/yachiko/clerk"
     description: "CLI for managing AWS Parameter Store secrets with a terminal UI"
-    license: "MIT"
     skip_upload: auto
-    install: |
-      bin.install "clerk"
-    test: |
-      system "#{bin}/clerk", "--version"
+    # Strip the macOS quarantine bit so the unsigned binary can launch.
+    # Without this, Gatekeeper rejects with "clerk is damaged and cannot be
+    # opened". The alternative is paying for Apple Developer notarization.
+    hooks:
+      post:
+        install: |
+          if OS.mac?
+            system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/clerk"]
+          end
 
 checksum:
   name_template: "checksums.txt"
