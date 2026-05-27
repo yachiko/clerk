@@ -838,25 +838,25 @@ func (m Model) renderDescribeBox(entry *cache.CacheEntry) string {
 func (m Model) renderConfirmDialog() string {
 	var b strings.Builder
 
-	action := m.state.Confirm.Action
-	if action == "delete" {
+	switch m.state.Confirm.Action {
+	case "delete":
 		b.WriteString(warningStyle.Render("⚠ CONFIRM DELETE"))
 		b.WriteString("\n\n")
-		b.WriteString(fmt.Sprintf("You are about to delete:\n%s\n\n", m.state.Confirm.Target))
+		fmt.Fprintf(&b, "You are about to delete:\n%s\n\n", m.state.Confirm.Target)
 		b.WriteString(warningStyle.Render("This action cannot be undone!"))
 		b.WriteString("\n\n")
 		b.WriteString(promptStyle.Render("Type 'delete me' to confirm: "))
 		b.WriteString(inputStyle.Render(m.state.Confirm.Input))
-	} else if action == "move" {
+	case "move":
 		b.WriteString(warningStyle.Render("MOVE/RENAME PARAMETER"))
 		b.WriteString("\n\n")
-		b.WriteString(fmt.Sprintf("From: %s\n\n", m.state.Confirm.Target))
+		fmt.Fprintf(&b, "From: %s\n\n", m.state.Confirm.Target)
 		b.WriteString(promptStyle.Render("To: "))
 		b.WriteString(inputStyle.Render(m.state.Confirm.Input))
-	} else if action == "copy" {
+	case "copy":
 		b.WriteString(warningStyle.Render("COPY PARAMETER"))
 		b.WriteString("\n\n")
-		b.WriteString(fmt.Sprintf("From: %s\n\n", m.state.Confirm.Target))
+		fmt.Fprintf(&b, "From: %s\n\n", m.state.Confirm.Target)
 		b.WriteString(promptStyle.Render("To: "))
 		b.WriteString(inputStyle.Render(m.state.Confirm.Input))
 	}
