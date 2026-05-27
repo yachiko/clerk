@@ -74,7 +74,7 @@ func (cm *ClipboardManager) Read() (string, error) {
 	return clipboard.ReadAll()
 }
 
-// IsSupported checks if clipboard operations are supported
+// IsClipboardSupported checks if clipboard operations are supported
 func IsClipboardSupported() bool {
-	return clipboard.Unsupported == false
+	return !clipboard.Unsupported
 }
