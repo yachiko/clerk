@@ -21,7 +21,7 @@ BINARY_PATH := bin/$(BINARY_NAME)
 # Platforms for cross-compilation
 PLATFORMS := linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64
 
-.PHONY: all build dev clean test coverage lint fmt fmt-check vet deps install uninstall release test-unit test-integration test-all moto-start moto-stop help
+.PHONY: all build dev clean test coverage lint fmt fmt-check vet deps install uninstall tag test-unit test-integration test-all moto-start moto-stop help
 
 ## Default target
 all: deps lint test build
@@ -100,23 +100,23 @@ uninstall:
 	@echo "Uninstalling $(BINARY_NAME)..."
 	rm -f /usr/local/bin/$(BINARY_NAME)
 
-## Build for all platforms
-release:
-	@echo "Building releases for version $(VERSION)..."
-	@mkdir -p dist
-	@for platform in $(PLATFORMS); do \
-		GOOS=$${platform%/*} GOARCH=$${platform#*/} \
-		CGO_ENABLED=0 $(GOBUILD) $(LDFLAGS) -o dist/$(BINARY_NAME)-$${platform%/*}-$${platform#*/}$$([ "$${platform%/*}" = "windows" ] && echo ".exe") ./cmd/clerk; \
-		echo "  Built: $(BINARY_NAME)-$${platform%/*}-$${platform#*/}"; \
-	done
-	@echo "Creating archives..."
-	@cd dist && for f in $(BINARY_NAME)-*; do \
-		if [ "$${f##*.}" = "exe" ]; then \
-			zip "$${f%.exe}.zip" "$$f"; \
-		else \
-			tar -czvf "$$f.tar.gz" "$$f"; \
-		fi; \
-	done
+## Create and push next patch version tag (vX.Y.(Z+1)); release pipeline builds artifacts via GoReleaser
+tag:
+	@set -e; \
+	last=$$(git tag --list 'v*' --sort=-v:refname | head -1); \
+	if [ -z "$$last" ]; then \
+	  new="v0.0.1"; \
+	else \
+	  ver=$${last#v}; \
+	  major=$${ver%%.*}; rest=$${ver#*.}; minor=$${rest%%.*}; patch=$${rest#*.}; \
+	  patch=$$((patch+1)); \
+	  new="v$$major.$$minor.$$patch"; \
+	fi; \
+	echo "Last tag: $$last"; \
+	echo "New tag: $$new"; \
+	git tag $$new; \
+	git push origin $$new; \
+	echo "✅ Created and pushed $$new"
 
 ## Start moto server for integration tests
 moto-start:
@@ -181,7 +181,7 @@ help:
 	@echo "  deps                - Download and tidy dependencies"
 	@echo "  install             - Install binary to GOPATH/bin"
 	@echo "  uninstall           - Remove binary from GOPATH/bin"
-	@echo "  release             - Build for all platforms"
+	@echo "  tag                 - Create and push next patch version tag"
 	@echo "  moto-start          - Start moto server for integration tests"
 	@echo "  moto-stop           - Stop moto server"
 	@echo "  clean               - Remove build artifacts"
