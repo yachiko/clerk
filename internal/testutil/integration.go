@@ -60,7 +60,7 @@ func IsMotoAvailable(endpoint string) bool {
 	if err != nil {
 		return false
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close()
 	return resp.StatusCode == http.StatusOK
 }
 
@@ -87,7 +87,7 @@ func ResetMoto(endpoint string) error {
 	if err != nil {
 		return err
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("moto reset returned status %d", resp.StatusCode)
 	}
@@ -111,7 +111,7 @@ func RunClerkInHome(ctx context.Context, cfg *IntegrationTestConfig, home string
 		if err != nil {
 			return "", "", fmt.Errorf("MkdirTemp: %w", err)
 		}
-		defer os.RemoveAll(tmp)
+		defer func() { _ = os.RemoveAll(tmp) }()
 		home = tmp
 	}
 

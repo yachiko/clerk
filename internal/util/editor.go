@@ -34,7 +34,7 @@ func (e *Editor) Edit(content string, extension string) (string, error) {
 		return "", fmt.Errorf("failed to create temp file: %w", err)
 	}
 
-	defer e.secureDelete(tempPath)
+	defer func() { _ = e.secureDelete(tempPath) }()
 
 	editor := e.getEditor()
 	if editor == "" {
@@ -71,17 +71,20 @@ func (e *Editor) createSecureTempFile(content string, extension string) (string,
 	if err != nil {
 		return "", err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	if _, err := f.WriteString(content); err != nil {
-		os.Remove(tempPath)
+		_ = os.Remove(tempPath)
 		return "", err
 	}
 
 	return tempPath, nil
 }
 
-// secureDelete overwrites and removes a file
+// secureDelete overwrites and removes a file. The zero-overwrite is
+// best-effort: on modern journaling/COW filesystems and SSDs it doesn't
+// reach the underlying blocks. Errors from the overwrite phase are
+// discarded — the unlink at the end is what actually matters.
 func (e *Editor) secureDelete(path string) error {
 	info, err := os.Stat(path)
 	if err != nil {
@@ -94,9 +97,9 @@ func (e *Editor) secureDelete(path string) error {
 	}
 
 	zeros := make([]byte, info.Size())
-	f.Write(zeros)
-	f.Sync()
-	f.Close()
+	_, _ = f.Write(zeros)
+	_ = f.Sync()
+	_ = f.Close()
 
 	return os.Remove(path)
 }
