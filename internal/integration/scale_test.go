@@ -5,98 +5,106 @@ package integration
 import (
 	"context"
 	"strings"
-	"testing"
 	"time"
 
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
+	. "github.com/onsi/ginkgo/v2"
+	. "github.com/onsi/gomega"
 	"github.com/yachiko/clerk/internal/testutil"
 )
 
-// largeScaleFixture creates `count` parameters in moto and registers cleanup.
-// Skipped automatically in -short mode.
-func largeScaleFixture(t *testing.T, cfg *testutil.IntegrationTestConfig, count int) []string {
-	t.Helper()
-	if testing.Short() {
-		t.Skip("skipping large-scale test in -short mode")
-	}
-
+// generateAtScale creates `count` random parameters in moto and registers
+// cleanup. Caller decides whether to skip the spec under -short.
+func generateAtScale(count int) []string {
 	fixtureCfg := testutil.DefaultFixtureConfig()
-	fixtureCfg.Endpoint = cfg.MotoEndpoint
-	fixtureCfg.Region = cfg.MotoRegion
+	fixtureCfg.Endpoint = integrationCfg.MotoEndpoint
+	fixtureCfg.Region = integrationCfg.MotoRegion
 	fixtureCfg.NumParameters = count
 
 	gen, err := testutil.NewFixtureGenerator(fixtureCfg)
-	require.NoError(t, err)
+	Expect(err).NotTo(HaveOccurred())
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 	created, err := gen.GenerateParameters(ctx)
-	require.NoError(t, err)
-	require.NotEmpty(t, created, "fixture generated zero parameters")
+	Expect(err).NotTo(HaveOccurred())
+	Expect(created).NotTo(BeEmpty(), "fixture generator should have produced parameters")
 
-	t.Cleanup(func() {
+	DeferCleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 		defer cancel()
 		_ = gen.CleanupParameters(ctx, created)
 	})
-	t.Logf("generated %d parameters", len(created))
+
+	GinkgoWriter.Printf("generated %d parameters\n", len(created))
 	return created
 }
 
-func TestIntegration_LargeScale_List(t *testing.T) {
-	cfg, home := setupTest(t)
-	created := largeScaleFixture(t, cfg, 200)
+var _ = Describe("clerk under load", func() {
+	var home string
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-	defer cancel()
+	BeforeEach(func() {
+		// We intentionally do NOT reset moto here; scale_test is allowed to
+		// stack parameters within a single run, and each spec creates its own
+		// fixture set so prior state is irrelevant.
+		home = GinkgoT().TempDir()
+	})
 
-	stdout, stderr, err := testutil.RunClerkInHome(ctx, cfg, home, "list")
-	require.NoErrorf(t, err, "stderr: %s", stderr)
+	It("lists a 200-parameter Parameter Store", Label("scale"), func() {
+		created := generateAtScale(200)
 
-	// Count distinct parameter paths in the output. Output format includes
-	// headers and ANSI styling; the assertion is "saw most of what we made".
-	nameCount := 0
-	for _, line := range strings.Split(stdout, "\n") {
-		if strings.Contains(line, "/") && !strings.Contains(line, "─") {
-			nameCount++
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer cancel()
+		stdout, stderr, err := testutil.RunClerkInHome(ctx, integrationCfg, home, "list")
+		Expect(err).NotTo(HaveOccurred(), "stderr: %s", stderr)
+
+		// Count distinct parameter-bearing lines. Random name generation can
+		// collide, so we require >= 80% of created visible.
+		nameLines := 0
+		for _, line := range strings.Split(stdout, "\n") {
+			if strings.Contains(line, "/") && !strings.Contains(line, "─") {
+				nameLines++
+			}
 		}
-	}
-	// Random name generation can collide; require >= 80% of created visible.
-	assert.GreaterOrEqual(t, nameCount, len(created)*8/10,
-		"list output (%d lines with /) should cover ~all %d created params", nameCount, len(created))
-}
+		Expect(nameLines).To(BeNumerically(">=", len(created)*8/10),
+			"list output (%d lines with /) should cover ~all %d created params", nameLines, len(created))
+	})
 
-func TestIntegration_LargeScale_Refresh(t *testing.T) {
-	cfg, home := setupTest(t)
-	largeScaleFixture(t, cfg, 300)
+	It("refreshes against a 300-parameter store within the budget", Label("scale"), func() {
+		generateAtScale(300)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
-	defer cancel()
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+		defer cancel()
+		start := time.Now()
+		stdout, stderr, err := testutil.RunClerkInHome(ctx, integrationCfg, home, "refresh")
+		duration := time.Since(start)
 
-	start := time.Now()
-	stdout, stderr, err := testutil.RunClerkInHome(ctx, cfg, home, "refresh")
-	duration := time.Since(start)
-	require.NoErrorf(t, err, "stderr: %s", stderr)
-	assert.Contains(t, strings.ToLower(stdout), "refresh")
-	t.Logf("refresh of 300 params completed in %v", duration)
-}
+		Expect(err).NotTo(HaveOccurred(), "stderr: %s", stderr)
+		Expect(strings.ToLower(stdout)).To(ContainSubstring("refresh"))
+		GinkgoWriter.Printf("refresh of 300 params completed in %v\n", duration)
+	})
 
-func TestIntegration_LargeScale_FilterPerformance(t *testing.T) {
-	cfg, home := setupTest(t)
-	largeScaleFixture(t, cfg, 500)
-
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
-	defer cancel()
-
-	for _, pattern := range []string{"/dev/*", "/prod/*", "/staging/*", "/qa/*"} {
-		t.Run("filter_"+pattern, func(t *testing.T) {
-			start := time.Now()
-			_, stderr, err := testutil.RunClerkInHome(ctx, cfg, home, "list", pattern)
-			duration := time.Since(start)
-			require.NoErrorf(t, err, "stderr: %s", stderr)
-			t.Logf("filter %s took %v", pattern, duration)
-			assert.Less(t, duration, 30*time.Second, "filter on 500 params should be fast")
+	Describe("filter performance on 500 parameters", Label("scale"), func() {
+		BeforeEach(func() {
+			generateAtScale(500)
 		})
-	}
-}
+
+		DescribeTable("filters complete within 30s",
+			func(pattern string) {
+				ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+				defer cancel()
+
+				start := time.Now()
+				_, stderr, err := testutil.RunClerkInHome(ctx, integrationCfg, home, "list", pattern)
+				duration := time.Since(start)
+
+				Expect(err).NotTo(HaveOccurred(), "stderr: %s", stderr)
+				GinkgoWriter.Printf("filter %s took %v\n", pattern, duration)
+				Expect(duration).To(BeNumerically("<", 30*time.Second))
+			},
+			Entry("/dev/*", "/dev/*"),
+			Entry("/prod/*", "/prod/*"),
+			Entry("/staging/*", "/staging/*"),
+			Entry("/qa/*", "/qa/*"),
+		)
+	})
+})

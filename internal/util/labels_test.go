@@ -2,73 +2,67 @@ package util
 
 import (
 	"strings"
-	"testing"
 
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
+	. "github.com/onsi/ginkgo/v2"
+	. "github.com/onsi/gomega"
 )
 
-func TestValidateLabel(t *testing.T) {
-	cases := []struct {
-		name    string
-		label   string
-		wantErr string
-	}{
-		{"empty", "", "empty"},
-		{"valid simple", "prod", ""},
-		{"valid with dash", "rollback-point", ""},
-		{"valid with dot", "v1.2.3", ""},
-		{"valid with underscore", "last_known_good", ""},
-		{"reserved prefix lower", "aws:foo", "reserved prefix"},
-		{"reserved prefix mixed case", "AWS:foo", "reserved prefix"},
-		{"invalid char space", "bad label", "invalid characters"},
-		{"invalid char slash", "bad/label", "invalid characters"},
-		{"too long", strings.Repeat("a", MaxLabelLength+1), "maximum length"},
-		{"max length exact", strings.Repeat("a", MaxLabelLength), ""},
-	}
-	for _, tt := range cases {
-		t.Run(tt.name, func(t *testing.T) {
-			err := ValidateLabel(tt.label)
-			if tt.wantErr == "" {
-				assert.NoError(t, err)
+var _ = Describe("ValidateLabel", func() {
+	DescribeTable("validation rules",
+		func(label, wantErrSub string) {
+			err := ValidateLabel(label)
+			if wantErrSub == "" {
+				Expect(err).NotTo(HaveOccurred())
 			} else {
-				require.Error(t, err)
-				assert.Contains(t, err.Error(), tt.wantErr)
+				Expect(err).To(MatchError(ContainSubstring(wantErrSub)))
 			}
-		})
-	}
-}
+		},
+		Entry("rejects empty", "", "empty"),
+		Entry("accepts simple word", "prod", ""),
+		Entry("accepts dashes", "rollback-point", ""),
+		Entry("accepts dots", "v1.2.3", ""),
+		Entry("accepts underscores", "last_known_good", ""),
+		Entry("rejects reserved prefix (lowercase)", "aws:foo", "reserved prefix"),
+		Entry("rejects reserved prefix (mixed case)", "AWS:foo", "reserved prefix"),
+		Entry("rejects spaces", "bad label", "invalid characters"),
+		Entry("rejects slashes", "bad/label", "invalid characters"),
+		Entry("rejects beyond max length", strings.Repeat("a", MaxLabelLength+1), "maximum length"),
+		Entry("accepts exactly max length", strings.Repeat("a", MaxLabelLength), ""),
+	)
+})
 
-func TestValidateLabels(t *testing.T) {
-	assert.NoError(t, ValidateLabels([]string{"prod", "stable"}))
+var _ = Describe("ValidateLabels", func() {
+	It("accepts a unique, valid set", func() {
+		Expect(ValidateLabels([]string{"prod", "stable"})).To(Succeed())
+	})
 
-	// Duplicate
-	err := ValidateLabels([]string{"prod", "prod"})
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "duplicate")
+	It("rejects duplicates", func() {
+		Expect(ValidateLabels([]string{"prod", "prod"})).To(MatchError(ContainSubstring("duplicate")))
+	})
 
-	// Too many
-	tooMany := make([]string, MaxLabelsPerVersion+1)
-	for i := range tooMany {
-		tooMany[i] = "label" + string(rune('a'+i))
-	}
-	err = ValidateLabels(tooMany)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "more than")
+	It("rejects sets larger than the per-version cap", func() {
+		tooMany := make([]string, MaxLabelsPerVersion+1)
+		for i := range tooMany {
+			tooMany[i] = "label" + string(rune('a'+i))
+		}
+		Expect(ValidateLabels(tooMany)).To(MatchError(ContainSubstring("more than")))
+	})
 
-	// Inner label invalid: ValidateLabel error surfaces.
-	err = ValidateLabels([]string{"ok", "aws:bad"})
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "reserved prefix")
-}
+	It("surfaces inner label errors", func() {
+		Expect(ValidateLabels([]string{"ok", "aws:bad"})).To(MatchError(ContainSubstring("reserved prefix")))
+	})
+})
 
-func TestSuggestLabels(t *testing.T) {
-	got := SuggestLabels()
-	assert.NotEmpty(t, got)
-	assert.Contains(t, got, "prod")
-	assert.Contains(t, got, "staging")
-	// Every suggestion must itself be a valid label.
-	for _, l := range got {
-		assert.NoError(t, ValidateLabel(l), "suggested label %q must validate", l)
-	}
-}
+var _ = Describe("SuggestLabels", func() {
+	It("returns a non-empty list including common environment names", func() {
+		got := SuggestLabels()
+		Expect(got).NotTo(BeEmpty())
+		Expect(got).To(ContainElements("prod", "staging"))
+	})
+
+	It("only suggests labels that themselves validate", func() {
+		for _, l := range SuggestLabels() {
+			Expect(ValidateLabel(l)).To(Succeed(), "suggested label %q must validate", l)
+		}
+	})
+})
