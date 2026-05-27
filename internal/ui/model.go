@@ -312,11 +312,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleKeyPress(msg)
 
 	case tea.MouseMsg:
-		// Handle mouse wheel scrolling
+		// bubbletea v1.x deprecated msg.Type / tea.MouseWheelUp in favor of
+		// msg.Button / tea.MouseButtonWheelUp. Wheel events still arrive as
+		// MouseActionPress so we don't need to filter on action.
 		if m.state.Mode == ViewModeDescribe {
 			// Describe view: scroll value vertically or horizontally
-			switch msg.Type {
-			case tea.MouseWheelUp:
+			switch msg.Button {
+			case tea.MouseButtonWheelUp:
 				// Shift + wheel: horizontal scroll
 				if msg.Shift && !m.state.ValueLineWrap {
 					if m.state.ValueHorizontalScroll > 0 {
@@ -329,7 +331,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					}
 				}
 				return m, nil
-			case tea.MouseWheelDown:
+			case tea.MouseButtonWheelDown:
 				// Shift + wheel: horizontal scroll
 				if msg.Shift && !m.state.ValueLineWrap {
 					m.state.ValueHorizontalScroll++
@@ -341,14 +343,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		} else if m.state.Mode == ViewModeList || m.state.Mode == ViewModeTree {
 			// Browse view: scroll through entries
-			switch msg.Type {
-			case tea.MouseWheelUp:
+			switch msg.Button {
+			case tea.MouseButtonWheelUp:
 				if m.state.SelectedIndex > 0 {
 					m.state.SelectedIndex--
 					m.adjustScroll()
 				}
 				return m, nil
-			case tea.MouseWheelDown:
+			case tea.MouseButtonWheelDown:
 				maxIndex := len(m.state.FilteredItems) - 1
 				if m.state.Mode == ViewModeTree {
 					maxIndex = len(m.state.TreeNodes) - 1
