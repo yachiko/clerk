@@ -26,9 +26,6 @@ var (
 			Background(lipgloss.Color("62")).
 			Foreground(lipgloss.Color("230"))
 
-	normalStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("252"))
-
 	dimStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("243"))
 
@@ -41,13 +38,6 @@ var (
 	errorStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("196"))
 
-	helpStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("243"))
-
-	borderStyle = lipgloss.NewStyle().
-			Border(lipgloss.RoundedBorder()).
-			BorderForeground(lipgloss.Color("252"))
-
 	labelStyle = lipgloss.NewStyle().
 			Bold(true).
 			Foreground(lipgloss.Color("86"))
@@ -57,15 +47,6 @@ var (
 
 	maskedStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("243"))
-
-	versionSelectedStyle = lipgloss.NewStyle().
-				Background(lipgloss.Color("62")).
-				Foreground(lipgloss.Color("230")).
-				Padding(0, 1)
-
-	versionNormalStyle = lipgloss.NewStyle().
-				Foreground(lipgloss.Color("243")).
-				Padding(0, 1)
 
 	warningStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("196")).

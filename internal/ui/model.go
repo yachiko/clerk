@@ -159,9 +159,9 @@ type backgroundRefreshProgressMsg struct {
 	ch      chan int
 }
 type backgroundRefreshCompleteMsg struct {
-	entries       []cache.CacheEntry
-	err           error
-	loadFromCache bool // If true, load entries from cache instead of using provided entries
+	// loadFromCache signals that the handler should re-read entries from
+	// the cache manager rather than carrying them on the message.
+	loadFromCache bool
 }
 
 type statusMsg string
