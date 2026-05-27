@@ -229,30 +229,33 @@ func outputParameter(param *aws.Parameter, displayValue string) error {
 		return encoder.Encode(output)
 	}
 
-	// Plain output
+	// Plain output. Errors from color.Print / fmt.Print on stdout are
+	// discarded explicitly — there's nothing useful clerk can do if stdout
+	// is closed mid-write, and forwarding the error would just mask the
+	// underlying terminal/pipe failure.
 	bold := color.New(color.Bold)
 	cyan := color.New(color.FgCyan)
 
-	bold.Println("Name:", param.Name)
+	_, _ = bold.Println("Name:", param.Name)
 
 	// Show value with appropriate styling
-	bold.Print("Value: ")
+	_, _ = bold.Print("Value: ")
 	if getMask {
 		color.Yellow(displayValue)
 	} else {
 		fmt.Println(displayValue)
 	}
 
-	cyan.Printf("Type: %s\n", param.Type)
-	cyan.Printf("Version: %d\n", param.Version)
-	cyan.Printf("Last Modified: %s\n", param.LastModifiedDate.Format(time.RFC3339))
+	_, _ = cyan.Printf("Type: %s\n", param.Type)
+	_, _ = cyan.Printf("Version: %d\n", param.Version)
+	_, _ = cyan.Printf("Last Modified: %s\n", param.LastModifiedDate.Format(time.RFC3339))
 
 	if param.ARN != "" {
-		cyan.Printf("ARN: %s\n", param.ARN)
+		_, _ = cyan.Printf("ARN: %s\n", param.ARN)
 	}
 
 	if len(param.Tags) > 0 {
-		cyan.Print("Tags: ")
+		_, _ = cyan.Print("Tags: ")
 		var tagPairs []string
 		for k, v := range param.Tags {
 			tagPairs = append(tagPairs, fmt.Sprintf("%s=%s", k, v))
