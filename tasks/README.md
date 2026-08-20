@@ -51,18 +51,6 @@ This directory contains detailed task files for implementing the Clerk CLI tool.
 │       ├── 17-unit-tests
 │       └── 18-integration-tests
 ```
-
-## Implementation Notes for Claude Haiku 4.5
-
-Each task file includes:
-
-1. **Objective** - Clear goal statement
-2. **Prerequisites** - Required prior tasks
-3. **Deliverables** - Complete code with file paths
-4. **Acceptance Criteria** - Checklist for completion
-5. **Example Output** - Expected behavior
-6. **Notes** - Implementation guidance
-
 ### Best Practices
 
 - Read the entire task file before starting
