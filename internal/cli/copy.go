@@ -74,15 +74,12 @@ func runCopy(cmd *cobra.Command, args []string) error {
 
 	// Update cache with region and account ID
 	cacheMgr, err := cache.NewManager(cfg, client.GetRegion(), client.GetAccountID())
-	if err != nil {
-		return fmt.Errorf("failed to initialize cache: %w", err)
-	}
 
 	// Refresh cache entry for destination. Cache update failures are
 	// non-fatal: the parameter already exists in AWS and the next refresh
 	// will reconcile.
-	destParamRetrieved, err := client.GetParameter(ctx, destination, false)
-	if err == nil {
+	destParamRetrieved, getErr := client.GetParameter(ctx, destination, false)
+	if err == nil && getErr == nil {
 		_ = cacheMgr.Update(cache.CacheEntry{
 			Name:             destParamRetrieved.Name,
 			Type:             destParamRetrieved.Type,

@@ -115,13 +115,23 @@ func (c *Client) GetParameterMetadata(ctx context.Context, name string) (*Parame
 		if aws.ToString(p.Name) != name {
 			continue
 		}
-		policies, err := json.Marshal(p.Policies)
+		policies, err := encodePolicyTexts(p.Policies)
 		if err != nil {
 			return nil, fmt.Errorf("failed to encode parameter policies: %w", err)
 		}
 		return &Parameter{Name: aws.ToString(p.Name), Type: string(p.Type), ARN: aws.ToString(p.ARN), DataType: aws.ToString(p.DataType), Description: aws.ToString(p.Description), KMSKeyID: aws.ToString(p.KeyId), Tier: string(p.Tier), AllowedPattern: aws.ToString(p.AllowedPattern), Policies: string(policies)}, nil
 	}
 	return nil, fmt.Errorf("parameter metadata not found: %s", name)
+}
+
+func encodePolicyTexts(policies []types.ParameterInlinePolicy) (string, error) {
+	policyTexts := make([]json.RawMessage, 0, len(policies))
+	for _, policy := range policies {
+		if policy.PolicyText == nil || *policy.PolicyText == "" { continue }
+		policyTexts = append(policyTexts, json.RawMessage(*policy.PolicyText))
+	}
+	encoded, err := json.Marshal(policyTexts)
+	return string(encoded), err
 }
 
 // GetParameterByVersion retrieves a specific version of a parameter
@@ -189,7 +199,7 @@ func (c *Client) PutParameter(ctx context.Context, input *PutParameterInput) (*P
 	if input.AllowedPattern != "" {
 		ssmInput.AllowedPattern = aws.String(input.AllowedPattern)
 	}
-	if input.Policies != "" {
+	if input.Policies != "" && input.Policies != "[]" {
 		ssmInput.Policies = aws.String(input.Policies)
 	}
 	if input.DataType != "" {
@@ -219,7 +229,7 @@ func (c *Client) PutParameter(ctx context.Context, input *PutParameterInput) (*P
 			tags = append(tags, types.Tag{Key: aws.String(k), Value: aws.String(v)})
 		}
 		if _, err := c.ssm.AddTagsToResource(ctx, &ssm.AddTagsToResourceInput{ResourceType: types.ResourceTypeForTaggingParameter, ResourceId: aws.String(input.Name), Tags: tags}); err != nil {
-			return nil, fmt.Errorf("parameter value was written but tags were not updated: %w", err)
+			return &PutParameterOutput{Version: output.Version}, fmt.Errorf("parameter value was written but tags were not updated: %w", err)
 		}
 	}
 
@@ -262,11 +272,17 @@ func (c *Client) Transfer(ctx context.Context, input TransferInput) (TransferRes
 	if err != nil && !IsParameterNotFoundError(err) {
 		return result, fmt.Errorf("check destination: %w", err)
 	}
+	if destination != nil && (destination.Type != source.Type || (destination.Tier != "" && source.Tier != "" && destination.Tier != source.Tier)) {
+		return result, fmt.Errorf("destination type/tier differs from source; choose a matching destination before overwrite")
+	}
 	put := &PutParameterInput{Name: input.Destination, Value: source.Value, Type: source.Type, Overwrite: destination != nil, KMSKeyID: source.KMSKeyID, Tags: source.Tags, Description: source.Description, Tier: source.Tier, AllowedPattern: source.AllowedPattern, Policies: source.Policies, DataType: source.DataType}
-	if _, err := c.PutParameter(ctx, put); err != nil {
+	putOutput, err := c.PutParameter(ctx, put)
+	if putOutput != nil {
+		result.DestinationWritten = true
+	}
+	if err != nil {
 		return result, fmt.Errorf("write destination: %w", err)
 	}
-	result.DestinationWritten = true
 	verified, err := c.GetParameter(ctx, input.Destination, true)
 	if err != nil {
 		return result, fmt.Errorf("destination was written but could not be verified: %w", err)
@@ -286,7 +302,7 @@ func (c *Client) Transfer(ctx context.Context, input TransferInput) (TransferRes
 		return result, fmt.Errorf("destination verified but source changed during transfer; source retained")
 	}
 	if err := c.DeleteParameter(ctx, input.Source); err != nil {
-		return result, fmt.Errorf("destination verified but failed to delete source; both parameters remain: %w", err)
+		return result, fmt.Errorf("destination verified but source deletion outcome is unknown; verify both parameters before retrying: %w", err)
 	}
 	result.SourceDeleted = true
 	return result, nil

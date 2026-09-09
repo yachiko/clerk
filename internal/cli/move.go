@@ -74,14 +74,18 @@ func runMove(cmd *cobra.Command, args []string) error {
 	// Confirm if not force
 	if !moveForce {
 		if globalOpts.Output == "json" {
+			_ = json.NewEncoder(os.Stdout).Encode(map[string]string{"error": "--force is required for a move with JSON output"})
 			return fmt.Errorf("--force is required for a move with JSON output")
 		}
 		fmt.Fprintf(os.Stderr, "You are about to move parameter: %s\n", source)
 		fmt.Fprintf(os.Stderr, "To destination: %s\n", destination)
+		fmt.Fprintf(os.Stderr, "Account: %s  Region: %s\n", client.GetAccountID(), client.GetRegion())
 		fmt.Fprint(os.Stderr, "Type 'move' to confirm: ")
 
 		var confirmation string
-		_, _ = fmt.Scanln(&confirmation)
+		if _, err := fmt.Fscanln(os.Stdin, &confirmation); err != nil {
+			return fmt.Errorf("move not confirmed: %w", err)
+		}
 
 		if confirmation != "move" {
 			fmt.Fprintln(os.Stderr, "Cancelled.")
@@ -99,21 +103,20 @@ func runMove(cmd *cobra.Command, args []string) error {
 
 	// Update cache with region and account ID
 	cacheMgr, err := cache.NewManager(cfg, client.GetRegion(), client.GetAccountID())
-	if err != nil {
-		return fmt.Errorf("failed to initialize cache: %w", err)
-	}
 
 	// Cache mutations are best-effort — the next refresh reconciles.
-	_ = cacheMgr.Delete(source)
-	destParamRetrieved, err := client.GetParameter(ctx, destination, false)
 	if err == nil {
-		_ = cacheMgr.Update(cache.CacheEntry{
-			Name:             destParamRetrieved.Name,
-			Type:             destParamRetrieved.Type,
-			Version:          destParamRetrieved.Version,
-			LastModifiedDate: destParamRetrieved.LastModifiedDate,
-			Tags:             destParamRetrieved.Tags,
-		})
+		_ = cacheMgr.Delete(source)
+		destParamRetrieved, getErr := client.GetParameter(ctx, destination, false)
+		if getErr == nil {
+			_ = cacheMgr.Update(cache.CacheEntry{
+				Name:             destParamRetrieved.Name,
+				Type:             destParamRetrieved.Type,
+				Version:          destParamRetrieved.Version,
+				LastModifiedDate: destParamRetrieved.LastModifiedDate,
+				Tags:             destParamRetrieved.Tags,
+			})
+		}
 	}
 
 	// Output result

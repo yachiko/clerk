@@ -27,12 +27,11 @@ var (
 // InitPutCommand initializes the PUT command
 func InitPutCommand() *cobra.Command {
 	putCmd := &cobra.Command{
-		Use:   "put <name> <value>",
+		Use:   "put <name> [value]",
 		Short: "Create or update a secret in AWS Parameter Store",
 		Long: `Create a new secret or update an existing one in AWS Parameter Store.
 
-The value can be provided directly as a string or as a path to a file
-containing the secret value.
+Positional values are literal. Use --file or --stdin for exact bytes.
 
 Examples:
   # Create a secret with a string value
@@ -49,7 +48,7 @@ Examples:
 
   # Create with custom KMS key
   clerk put "/prod/secret" "value" --kms-key-id "alias/my-key"`,
-		Args: cobra.ExactArgs(2),
+		Args: validatePutArgs,
 		RunE: runPut,
 	}
 
@@ -67,7 +66,10 @@ func runPut(cmd *cobra.Command, args []string) error {
 	defer cancel()
 
 	name := args[0]
-	valueOrFile := args[1]
+	valueOrFile := ""
+	if len(args) == 2 {
+		valueOrFile = args[1]
+	}
 
 	if err := validateParameterIdentifier(name, false); err != nil {
 		return err
@@ -118,6 +120,10 @@ func runPut(cmd *cobra.Command, args []string) error {
 	if !isValidParamType(paramType) {
 		return fmt.Errorf("invalid parameter type: %s (valid: String, StringList, SecureString)", paramType)
 	}
+	kmsKeyID := putKMSKeyID
+	if kmsKeyID == "" && existing != nil && paramType == "SecureString" {
+		kmsKeyID = existing.KMSKeyID
+	}
 
 	// Prepare input
 	input := &aws.PutParameterInput{
@@ -125,7 +131,7 @@ func runPut(cmd *cobra.Command, args []string) error {
 		Value:     value,
 		Type:      paramType,
 		Overwrite: isUpdate,
-		KMSKeyID:  putKMSKeyID,
+		KMSKeyID:  kmsKeyID,
 		Tags:      tags,
 	}
 
@@ -177,6 +183,22 @@ func runPut(cmd *cobra.Command, args []string) error {
 		color.Cyan("Tags: %s", formatTags(tags))
 	}
 
+	return nil
+}
+
+func validatePutArgs(cmd *cobra.Command, args []string) error {
+	if len(args) < 1 || len(args) > 2 {
+		return fmt.Errorf("accepts a name and one literal value, or a name with --file/--stdin")
+	}
+	if putFile != "" && putStdin {
+		return fmt.Errorf("--file and --stdin cannot be used together")
+	}
+	if len(args) == 2 && (putFile != "" || putStdin) {
+		return fmt.Errorf("literal value cannot be combined with --file or --stdin")
+	}
+	if len(args) == 1 && putFile == "" && !putStdin {
+		return fmt.Errorf("a literal value, --file, or --stdin is required")
+	}
 	return nil
 }
 
