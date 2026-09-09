@@ -6,407 +6,380 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sort"
-	"strings"
 	"sync"
 	"time"
 
 	"github.com/yachiko/clerk/internal/aws"
 	"github.com/yachiko/clerk/internal/config"
+	"github.com/yachiko/clerk/internal/parammatch"
 )
 
-// Manager handles cache operations
+const tagTTL = 15 * time.Minute
+
 type Manager struct {
-	cachePath string
-	ttl       time.Duration
-	data      *CacheData
-	mu        sync.RWMutex
-	lockFile  string
-	region    string
-	accountID string
+	cachePath         string
+	ttl               time.Duration
+	data              *CacheData
+	mu                sync.RWMutex
+	refreshMu         sync.Mutex
+	lockFile          string
+	region, accountID string
+	changes           map[string]*CacheEntry
 }
 
-// NewManager creates a new cache manager
-// region and accountID are used to scope the cache file
 func NewManager(cfg *config.Config, region, accountID string) (*Manager, error) {
-	var cachePath string
-
-	// Always use the new structure: ~/.clerk/cache/<accountID>/<region>.json
-	// Ignore old CachePath setting (it was a file path, not a directory)
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return nil, fmt.Errorf("failed to get home directory: %w", err)
 	}
-	cachePath = filepath.Join(home, ".clerk", "cache", accountID, region+".json")
-
-	m := &Manager{
-		cachePath: cachePath,
-		ttl:       cfg.CacheTTL,
-		lockFile:  cachePath + ".lock",
-		data:      &CacheData{Entries: []CacheEntry{}},
-		region:    region,
-		accountID: accountID,
-	}
-
-	_ = m.load()
-
+	p := filepath.Join(home, ".clerk", "cache", accountID, region+".json")
+	m := &Manager{cachePath: p, ttl: cfg.CacheTTL, lockFile: p + ".lock", region: region, accountID: accountID, data: &CacheData{Entries: []CacheEntry{}}, changes: map[string]*CacheEntry{}}
+	_ = m.load() // corrupt caches are cache misses
 	return m, nil
 }
 
-// load reads cache from disk
-func (m *Manager) load() error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+func cloneEntry(e CacheEntry) CacheEntry {
+	if e.Tags != nil {
+		e.Tags = cloneTags(e.Tags)
+	}
+	if e.VersionHistory != nil {
+		e.VersionHistory = append([]VersionHistoryEntry(nil), e.VersionHistory...)
+	}
+	return e
+}
+func cloneTags(in map[string]string) map[string]string {
+	out := make(map[string]string, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
+}
+func cloneData(in *CacheData) *CacheData {
+	out := *in
+	out.Entries = make([]CacheEntry, len(in.Entries))
+	for i := range in.Entries {
+		out.Entries[i] = cloneEntry(in.Entries[i])
+	}
+	return &out
+}
 
-	data, err := os.ReadFile(m.cachePath)
+func (m *Manager) load() error {
+	b, err := os.ReadFile(m.cachePath)
 	if err != nil {
 		return err
 	}
-
-	return json.Unmarshal(data, m.data)
+	var d CacheData
+	if err := json.Unmarshal(b, &d); err != nil {
+		return fmt.Errorf("invalid cache file: %w", err)
+	}
+	m.mu.Lock()
+	m.data = cloneData(&d)
+	m.mu.Unlock()
+	return nil
 }
 
-// save writes cache to disk with file locking
-func (m *Manager) save() error {
-	// Create directory first (before trying to create lock file)
-	dir := filepath.Dir(m.cachePath)
-	if err := os.MkdirAll(dir, 0700); err != nil {
+// withDiskLock serializes a whole read/merge/write transaction. os.Rename
+// provides readers with either the old complete JSON document or the new one.
+func (m *Manager) withDiskLock(fn func(*CacheData) error) error {
+	if err := os.MkdirAll(filepath.Dir(m.cachePath), 0700); err != nil {
 		return fmt.Errorf("failed to create cache directory: %w", err)
 	}
-
 	if err := m.acquireLock(); err != nil {
 		return fmt.Errorf("failed to acquire cache lock: %w", err)
 	}
 	defer m.releaseLock()
-
-	data, err := json.MarshalIndent(m.data, "", "  ")
-	if err != nil {
-		return fmt.Errorf("failed to marshal cache: %w", err)
+	d := &CacheData{Entries: []CacheEntry{}}
+	if b, err := os.ReadFile(m.cachePath); err == nil {
+		if json.Unmarshal(b, d) != nil {
+			d = &CacheData{Entries: []CacheEntry{}}
+		}
+	} else if !os.IsNotExist(err) {
+		return err
 	}
-
-	if err := os.WriteFile(m.cachePath, data, 0600); err != nil {
+	if err := fn(d); err != nil {
+		return err
+	}
+	b, err := json.MarshalIndent(d, "", "  ")
+	if err != nil {
+		return err
+	}
+	f, err := os.CreateTemp(filepath.Dir(m.cachePath), ".cache-*.tmp")
+	if err != nil {
+		return err
+	}
+	tmp := f.Name()
+	defer os.Remove(tmp)
+	if err = f.Chmod(0600); err == nil {
+		_, err = f.Write(b)
+	}
+	if closeErr := f.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
 		return fmt.Errorf("failed to write cache: %w", err)
 	}
-
+	if err = os.Rename(tmp, m.cachePath); err != nil {
+		return fmt.Errorf("failed to replace cache: %w", err)
+	}
+	m.mu.Lock()
+	m.data = cloneData(d)
+	m.mu.Unlock()
 	return nil
 }
-
-// acquireLock creates a lock file
 func (m *Manager) acquireLock() error {
-	for i := 0; i < 10; i++ {
+	for i := 0; i < 50; i++ {
 		f, err := os.OpenFile(m.lockFile, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
 		if err == nil {
 			_ = f.Close()
 			return nil
 		}
 		if os.IsExist(err) {
-			info, statErr := os.Stat(m.lockFile)
-			if statErr == nil && time.Since(info.ModTime()) > 5*time.Minute {
+			if info, se := os.Stat(m.lockFile); se == nil && time.Since(info.ModTime()) > 5*time.Minute {
 				_ = os.Remove(m.lockFile)
 				continue
 			}
-			time.Sleep(100 * time.Millisecond)
+			time.Sleep(20 * time.Millisecond)
 			continue
 		}
 		return err
 	}
 	return fmt.Errorf("failed to acquire lock after retries")
 }
+func (m *Manager) releaseLock() { _ = os.Remove(m.lockFile) }
 
-// releaseLock removes the lock file. Errors are ignored: a missing lock
-// file on unlock means someone else cleaned up (eg stale-lock reclaim),
-// which is fine — we just want it gone.
-func (m *Manager) releaseLock() {
-	_ = os.Remove(m.lockFile)
-}
-
-// IsExpired checks if the cache is expired
 func (m *Manager) IsExpired() bool {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-
-	if m.data.LastRefresh.IsZero() {
-		return true
-	}
-	return time.Since(m.data.LastRefresh) > m.ttl
+	return m.data.LastRefresh.IsZero() || m.data.Incomplete || time.Since(m.data.LastRefresh) > m.ttl
 }
-
-// GetAge returns the duration since last refresh
 func (m *Manager) GetAge() time.Duration {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-
 	if m.data.LastRefresh.IsZero() {
-		return time.Duration(0)
+		return 0
 	}
 	return time.Since(m.data.LastRefresh)
 }
-
-// GetStats returns cache statistics
 func (m *Manager) GetStats() CacheStats {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-
-	return CacheStats{
-		TotalEntries: len(m.data.Entries),
-		LastRefresh:  m.data.LastRefresh,
-		IsExpired:    m.IsExpired(),
-		Region:       m.data.Region,
-	}
+	d := m.data
+	return CacheStats{TotalEntries: len(d.Entries), LastRefresh: d.LastRefresh, IsExpired: d.LastRefresh.IsZero() || d.Incomplete || time.Since(d.LastRefresh) > m.ttl, Region: d.Region, Complete: !d.Incomplete}
 }
-
-// GetAll returns all cached entries
 func (m *Manager) GetAll() []CacheEntry {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-
-	entries := make([]CacheEntry, len(m.data.Entries))
-	copy(entries, m.data.Entries)
-	return entries
+	out := make([]CacheEntry, len(m.data.Entries))
+	for i, e := range m.data.Entries {
+		out[i] = cloneEntry(e)
+	}
+	return out
 }
-
-// Search searches cache entries by glob pattern
 func (m *Manager) Search(pattern string) []CacheEntry {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-
-	var results []CacheEntry
-	for _, entry := range m.data.Entries {
-		if matchGlob(pattern, entry.Name) {
-			results = append(results, entry)
+	var out []CacheEntry
+	for _, e := range m.data.Entries {
+		ok, err := parammatch.Match(pattern, e.Name)
+		if err == nil && ok {
+			out = append(out, cloneEntry(e))
 		}
 	}
-	return results
+	return out
 }
-
-// SearchByTag searches cache entries by tag
 func (m *Manager) SearchByTag(key, value string) []CacheEntry {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-
-	var results []CacheEntry
-	for _, entry := range m.data.Entries {
-		if v, ok := entry.Tags[key]; ok {
-			if value == "" || v == value {
-				results = append(results, entry)
-			}
+	var out []CacheEntry
+	for _, e := range m.data.Entries {
+		if v, ok := e.Tags[key]; ok && (value == "" || v == value) {
+			out = append(out, cloneEntry(e))
 		}
 	}
-	return results
+	return out
 }
-
-// Get retrieves a single entry by name
 func (m *Manager) Get(name string) (*CacheEntry, bool) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-
-	for _, entry := range m.data.Entries {
-		if entry.Name == name {
-			return &entry, true
+	for _, e := range m.data.Entries {
+		if e.Name == name {
+			x := cloneEntry(e)
+			return &x, true
 		}
 	}
 	return nil, false
 }
-
-// Update updates or adds a single entry
-func (m *Manager) Update(entry CacheEntry) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	for i, e := range m.data.Entries {
-		if e.Name == entry.Name {
-			m.data.Entries[i] = entry
-			return m.save()
+func upsert(es []CacheEntry, e CacheEntry) []CacheEntry {
+	for i := range es {
+		if es[i].Name == e.Name {
+			es[i] = cloneEntry(e)
+			return es
 		}
 	}
-
-	m.data.Entries = append(m.data.Entries, entry)
-	return m.save()
+	return append(es, cloneEntry(e))
 }
-
-// Delete removes an entry from cache
+func remove(es []CacheEntry, name string) []CacheEntry {
+	for i := range es {
+		if es[i].Name == name {
+			return append(es[:i], es[i+1:]...)
+		}
+	}
+	return es
+}
+func (m *Manager) Update(e CacheEntry) error {
+	e = cloneEntry(e)
+	m.mu.Lock()
+	m.changes[e.Name] = &e
+	m.mu.Unlock()
+	return m.withDiskLock(func(d *CacheData) error { d.Entries = upsert(d.Entries, e); return nil })
+}
 func (m *Manager) Delete(name string) error {
 	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	for i, e := range m.data.Entries {
-		if e.Name == name {
-			m.data.Entries = append(m.data.Entries[:i], m.data.Entries[i+1:]...)
-			return m.save()
-		}
-	}
-	return nil
+	m.changes[name] = nil
+	m.mu.Unlock()
+	return m.withDiskLock(func(d *CacheData) error { d.Entries = remove(d.Entries, name); return nil })
 }
 
-// RefreshProgressCallback is called during refresh
 type RefreshProgressCallback func(current, total int)
 
-// Refresh updates the entire cache from AWS
-// It optimizes by reusing cached tags for unchanged parameters (same version)
-func (m *Manager) Refresh(ctx context.Context, client *aws.Client, region string, parallel int, progressCb RefreshProgressCallback) error {
-	// Build a map of existing entries by name for quick lookup
-	m.mu.RLock()
-	existingByName := make(map[string]CacheEntry, len(m.data.Entries))
-	for _, e := range m.data.Entries {
-		existingByName[e.Name] = e
+func (m *Manager) Refresh(ctx context.Context, client *aws.Client, region string, parallel int, cb RefreshProgressCallback) error {
+	m.refreshMu.Lock()
+	defer m.refreshMu.Unlock()
+	if parallel < 1 {
+		parallel = 1
 	}
+	m.mu.RLock()
+	old := cloneData(m.data)
 	m.mu.RUnlock()
-
-	// Stream parameters as they're discovered
-	paramsCh := make(chan aws.ParameterMetadata, 100)
+	prior := map[string]CacheEntry{}
+	for _, e := range old.Entries {
+		prior[e.Name] = e
+	}
+	ch := make(chan aws.ParameterMetadata, 100)
+	var result aws.DescribeResult
 	var streamErr error
-	var streamWg sync.WaitGroup
-
-	streamWg.Add(1)
-	go func() {
-		defer streamWg.Done()
-		streamErr = client.DescribeParametersStream(ctx, paramsCh)
-	}()
-
-	// Process parameters as they arrive
-	var entries []CacheEntry
-	var mu sync.Mutex
+	go func() { result, streamErr = client.DescribeParametersStream(ctx, ch) }()
+	var es []CacheEntry
+	var esMu sync.Mutex
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, parallel)
-	completed := 0
-	reused := 0
-
-	for param := range paramsCh {
+	done := 0
+	for p := range ch {
+		p := p
 		wg.Add(1)
-		go func(p aws.ParameterMetadata) {
+		go func() {
 			defer wg.Done()
-
-			// Acquire semaphore slot to limit concurrency
 			sem <- struct{}{}
 			defer func() { <-sem }()
-
-			if ctx.Err() != nil {
-				return
+			e := CacheEntry{Name: p.Name, Type: p.Type, Version: p.Version, LastModifiedDate: p.LastModifiedDate}
+			if old, ok := prior[p.Name]; ok {
+				e.Tags = old.Tags
+				e.TagsFetchedAt = old.TagsFetchedAt
+				e.TagsComplete = old.TagsComplete
+				e.TagsError = old.TagsError
+				e.VersionHistory = old.VersionHistory
 			}
-
-			// Check if we can reuse cached entry (same version = unchanged)
-			if existing, ok := existingByName[p.Name]; ok && existing.Version == p.Version {
-				// Reuse cached entry - no need to fetch tags or history
-				mu.Lock()
-				entries = append(entries, existing)
-				completed++
-				reused++
-				if progressCb != nil {
-					progressCb(completed, 0)
-				}
-				mu.Unlock()
-				return
-			}
-
-			// New or changed parameter - fetch tags
-			entry := CacheEntry{
-				Name:             p.Name,
-				Type:             p.Type,
-				Version:          p.Version,
-				LastModifiedDate: p.LastModifiedDate,
-			}
-
-			tags, err := client.GetParameterTags(ctx, p.Name)
-			if err == nil {
-				entry.Tags = tags
-			}
-
-			// Fetch version history for parameters with version > 1
-			if p.Version > 1 {
-				history, err := client.GetParameterHistory(ctx, p.Name, 50, false)
-				if err == nil {
-					for _, h := range history {
-						entry.VersionHistory = append(entry.VersionHistory, VersionHistoryEntry{
-							Version:  h.Version,
-							Modified: h.LastModifiedDate,
-						})
-					}
+			if e.TagsFetchedAt.IsZero() || time.Since(e.TagsFetchedAt) >= tagTTL || !e.TagsComplete {
+				tags, err := client.GetParameterTags(ctx, p.Name)
+				if err != nil {
+					e.TagsError = err.Error()
+					e.TagsComplete = false
+				} else {
+					e.Tags = tags
+					e.TagsFetchedAt = time.Now()
+					e.TagsComplete = true
+					e.TagsError = ""
 				}
 			}
-
-			mu.Lock()
-			entries = append(entries, entry)
-			completed++
-			if progressCb != nil {
-				progressCb(completed, 0)
+			esMu.Lock()
+			es = append(es, e)
+			done++
+			if cb != nil {
+				cb(done, 0)
 			}
-			mu.Unlock()
-		}(param)
+			esMu.Unlock()
+		}()
 	}
-
 	wg.Wait()
-	streamWg.Wait()
-
 	if streamErr != nil {
 		return streamErr
 	}
-
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}
-
-	m.mu.Lock()
-	m.data = &CacheData{
-		LastRefresh: time.Now(),
-		Region:      region,
-		Entries:     entries,
-	}
-	m.mu.Unlock()
-
-	return m.save()
+	return m.withDiskLock(func(d *CacheData) error {
+		next := &CacheData{LastRefresh: time.Now(), Region: region, Incomplete: !result.Complete, Entries: es}
+		if !result.Complete {
+			for _, e := range d.Entries {
+				found := false
+				for _, seen := range es {
+					if e.Name == seen.Name {
+						found = true
+						break
+					}
+				}
+				if !found {
+					next.Entries = append(next.Entries, cloneEntry(e))
+				}
+			}
+		}
+		// Another process can have changed the disk snapshot while this refresh
+		// was in flight. Rebase those changes when they differ from our starting
+		// snapshot, rather than overwriting a successful local mutation.
+		start := map[string]CacheEntry{}
+		for _, e := range old.Entries {
+			start[e.Name] = e
+		}
+		current := map[string]CacheEntry{}
+		for _, e := range d.Entries {
+			current[e.Name] = e
+		}
+		for name, before := range start {
+			if _, stillPresent := current[name]; !stillPresent {
+				next.Entries = remove(next.Entries, name)
+			} else if !reflect.DeepEqual(before, current[name]) {
+				next.Entries = upsert(next.Entries, current[name])
+			}
+		}
+		for name, now := range current {
+			if _, existed := start[name]; !existed {
+				next.Entries = upsert(next.Entries, now)
+			}
+		}
+		m.mu.Lock()
+		changes := m.changes
+		m.changes = map[string]*CacheEntry{}
+		m.mu.Unlock()
+		for name, e := range changes {
+			if e == nil {
+				next.Entries = remove(next.Entries, name)
+			} else {
+				next.Entries = upsert(next.Entries, *e)
+			}
+		}
+		*d = *next
+		return nil
+	})
 }
 
-// Sort sorts entries by the given criteria
-func (m *Manager) Sort(entries []CacheEntry, by string) []CacheEntry {
-	sorted := make([]CacheEntry, len(entries))
-	copy(sorted, entries)
-
+func (m *Manager) Sort(es []CacheEntry, by string) []CacheEntry {
+	out := make([]CacheEntry, len(es))
+	for i, e := range es {
+		out[i] = cloneEntry(e)
+	}
 	switch by {
 	case "name", "n":
-		sort.Slice(sorted, func(i, j int) bool {
-			return sorted[i].Name < sorted[j].Name
-		})
+		sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	case "created", "c":
-		sort.Slice(sorted, func(i, j int) bool {
-			return sorted[i].LastModifiedDate.Before(sorted[j].LastModifiedDate)
-		})
+		sort.Slice(out, func(i, j int) bool { return out[i].LastModifiedDate.Before(out[j].LastModifiedDate) })
 	case "modified", "m":
-		sort.Slice(sorted, func(i, j int) bool {
-			return sorted[i].LastModifiedDate.After(sorted[j].LastModifiedDate)
-		})
+		sort.Slice(out, func(i, j int) bool { return out[i].LastModifiedDate.After(out[j].LastModifiedDate) })
 	}
-
-	return sorted
+	return out
 }
-
-// matchGlob performs glob pattern matching
 func matchGlob(pattern, name string) bool {
-	if pattern == "" || pattern == "*" || pattern == "/*" {
-		return true
-	}
-
-	if strings.HasSuffix(pattern, "/*") {
-		prefix := strings.TrimSuffix(pattern, "/*")
-		if prefix == "" {
-			return true
-		}
-		return strings.HasPrefix(name, prefix+"/") || name == prefix
-	}
-
-	if strings.HasPrefix(pattern, "*") && strings.HasSuffix(pattern, "*") {
-		substr := strings.Trim(pattern, "*")
-		return strings.Contains(strings.ToLower(name), strings.ToLower(substr))
-	}
-
-	if strings.HasSuffix(pattern, "*") {
-		prefix := strings.TrimSuffix(pattern, "*")
-		return strings.HasPrefix(name, prefix)
-	}
-
-	if strings.HasPrefix(pattern, "*") {
-		suffix := strings.TrimPrefix(pattern, "*")
-		return strings.HasSuffix(name, suffix)
-	}
-
-	return strings.Contains(strings.ToLower(name), strings.ToLower(pattern))
+	ok, err := parammatch.Match(pattern, name)
+	return err == nil && ok
 }

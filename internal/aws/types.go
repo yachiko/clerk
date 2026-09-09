@@ -28,6 +28,12 @@ type ParameterMetadata struct {
 	Tags             map[string]string `json:"tags,omitempty"`
 }
 
+// DescribeResult records whether a metadata scan observed the whole account.
+type DescribeResult struct {
+	Complete  bool
+	Truncated bool
+}
+
 // ParameterHistory represents a historical version of a parameter
 type ParameterHistory struct {
 	Name             string    `json:"name"`

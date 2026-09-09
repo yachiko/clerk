@@ -4,13 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/ssm"
 	"github.com/aws/aws-sdk-go-v2/service/ssm/types"
 	"github.com/aws/aws-sdk-go-v2/service/sts"
+	"github.com/yachiko/clerk/internal/parammatch"
 )
 
 // Client wraps the AWS SSM client
@@ -97,21 +97,6 @@ func (c *Client) GetParameter(ctx context.Context, name string, withDecryption b
 		LastModifiedDate: aws.ToTime(p.LastModifiedDate),
 		ARN:              aws.ToString(p.ARN),
 		DataType:         aws.ToString(p.DataType),
-	}
-
-	tags, err := c.GetParameterTags(ctx, name)
-	if err == nil {
-		param.Tags = tags
-	}
-	if metadata, err := c.getParameterMetadata(ctx, aws.ToString(p.Name)); err == nil {
-		param.Description = metadata.Description
-		param.KMSKeyID = metadata.KMSKeyID
-		param.Tier = metadata.Tier
-		param.AllowedPattern = metadata.AllowedPattern
-		param.Policies = metadata.Policies
-		if metadata.DataType != "" {
-			param.DataType = metadata.DataType
-		}
 	}
 
 	return param, nil
@@ -363,29 +348,28 @@ func (c *Client) GetParameterHistory(ctx context.Context, name string, maxResult
 	return history, nil
 }
 
-// ListParameters lists all parameters matching a path
+// ListParameters lists metadata only. DescribeParameters avoids returning
+// ordinary String values as an incidental result of inventory browsing.
 func (c *Client) ListParameters(ctx context.Context, path string, recursive bool) ([]ParameterMetadata, error) {
 	var params []ParameterMetadata
-
-	if strings.Contains(path, "*") {
-		return c.listParametersWithFilter(ctx, path)
-	}
-
-	input := &ssm.GetParametersByPathInput{
-		Path:           aws.String(path),
-		Recursive:      aws.Bool(recursive),
-		WithDecryption: aws.Bool(false),
-	}
-
-	paginator := ssm.NewGetParametersByPathPaginator(c.ssm, input)
+	_ = recursive // retained for source compatibility
+	input := &ssm.DescribeParametersInput{MaxResults: aws.Int32(c.describePageSize)}
+	paginator := ssm.NewDescribeParametersPaginator(c.ssm, input)
 
 	for paginator.HasMorePages() {
 		output, err := paginator.NextPage(ctx)
 		if err != nil {
-			return nil, fmt.Errorf("failed to list parameters: %w", err)
+			return nil, fmt.Errorf("failed to describe parameters: %w", err)
 		}
 
 		for _, p := range output.Parameters {
+			ok, matchErr := parammatch.Match(path, aws.ToString(p.Name))
+			if matchErr != nil {
+				return nil, matchErr
+			}
+			if !ok {
+				continue
+			}
 			params = append(params, ParameterMetadata{
 				Name:             aws.ToString(p.Name),
 				Type:             string(p.Type),
@@ -395,6 +379,26 @@ func (c *Client) ListParameters(ctx context.Context, path string, recursive bool
 		}
 	}
 
+	return params, nil
+}
+
+// ListParametersByPath is the explicit compatibility path for installations
+// granted only ssm:GetParametersByPath. It is intentionally separate from the
+// inventory API because SSM includes String values in this response even when
+// WithDecryption is false. Callers must treat it as a scoped-read operation.
+func (c *Client) ListParametersByPath(ctx context.Context, path string, recursive bool) ([]ParameterMetadata, error) {
+	input := &ssm.GetParametersByPathInput{Path: aws.String(path), Recursive: aws.Bool(recursive), WithDecryption: aws.Bool(false)}
+	paginator := ssm.NewGetParametersByPathPaginator(c.ssm, input)
+	var params []ParameterMetadata
+	for paginator.HasMorePages() {
+		output, err := paginator.NextPage(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("failed to list parameters by path: %w", err)
+		}
+		for _, p := range output.Parameters {
+			params = append(params, ParameterMetadata{Name: aws.ToString(p.Name), Type: string(p.Type), Version: p.Version, LastModifiedDate: aws.ToTime(p.LastModifiedDate)})
+		}
+	}
 	return params, nil
 }
 
@@ -414,7 +418,7 @@ func (c *Client) listParametersWithFilter(ctx context.Context, pattern string) (
 
 		for _, p := range output.Parameters {
 			name := aws.ToString(p.Name)
-			if matchGlob(pattern, name) {
+			if ok, _ := parammatch.Match(pattern, name); ok {
 				params = append(params, ParameterMetadata{
 					Name:             name,
 					Type:             string(p.Type),
@@ -462,7 +466,7 @@ func (c *Client) DescribeAllParameters(ctx context.Context) ([]ParameterMetadata
 }
 
 // DescribeParametersStream sends parameters to a channel as they're discovered
-func (c *Client) DescribeParametersStream(ctx context.Context, ch chan<- ParameterMetadata) error {
+func (c *Client) DescribeParametersStream(ctx context.Context, ch chan<- ParameterMetadata) (DescribeResult, error) {
 	defer close(ch)
 
 	input := &ssm.DescribeParametersInput{
@@ -473,23 +477,23 @@ func (c *Client) DescribeParametersStream(ctx context.Context, ch chan<- Paramet
 	var count int32
 	for paginator.HasMorePages() {
 		if ctx.Err() != nil {
-			return ctx.Err()
+			return DescribeResult{}, ctx.Err()
 		}
 
 		output, err := paginator.NextPage(ctx)
 		if err != nil {
-			return fmt.Errorf("failed to describe parameters: %w", err)
+			return DescribeResult{}, fmt.Errorf("failed to describe parameters: %w", err)
 		}
 
 		for _, p := range output.Parameters {
 			// Check max-items limit before sending
 			if c.describeMaxItems > 0 && count >= c.describeMaxItems {
-				return nil
+				return DescribeResult{Truncated: true}, nil
 			}
 
 			select {
 			case <-ctx.Done():
-				return ctx.Err()
+				return DescribeResult{}, ctx.Err()
 			case ch <- ParameterMetadata{
 				Name:             aws.ToString(p.Name),
 				Type:             string(p.Type),
@@ -501,21 +505,7 @@ func (c *Client) DescribeParametersStream(ctx context.Context, ch chan<- Paramet
 		}
 	}
 
-	return nil
-}
-
-// matchGlob performs simple glob pattern matching
-func matchGlob(pattern, name string) bool {
-	if pattern == "*" || pattern == "/*" {
-		return true
-	}
-
-	if strings.HasSuffix(pattern, "/*") {
-		prefix := strings.TrimSuffix(pattern, "/*")
-		return strings.HasPrefix(name, prefix+"/")
-	}
-
-	return pattern == name
+	return DescribeResult{Complete: true}, nil
 }
 
 // GetRegion returns the AWS region for this client

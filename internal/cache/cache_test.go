@@ -141,7 +141,7 @@ var _ = Describe("cache.Manager", func() {
 			Entry("/prod/* → prod entries", "/prod/*", 2),
 			Entry("*password → suffix match", "*password", 2),
 			Entry("*db* → contains match", "*db*", 2),
-			Entry("/prod → prefix-only also works", "/prod", 2),
+			Entry("/prod is an exact name", "/prod", 0),
 			Entry("/staging/* → no match", "/staging/*", 0),
 		)
 	})
@@ -258,6 +258,32 @@ var _ = Describe("cache.Manager", func() {
 		})
 	})
 
+	Describe("concurrent managers", func() {
+		It("merges independent updates instead of losing the earlier writer", func() {
+			cfg := &config.Config{CacheTTL: time.Hour}
+			other, err := NewManager(cfg, "us-east-1", "123456789012")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(mgr.Update(CacheEntry{Name: "/one"})).To(Succeed())
+			Expect(other.Update(CacheEntry{Name: "/two"})).To(Succeed())
+
+			final, err := NewManager(cfg, "us-east-1", "123456789012")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(names(final.GetAll())).To(ConsistOf("/one", "/two"))
+		})
+
+		It("does not expose mutable tag maps", func() {
+			Expect(mgr.Update(CacheEntry{Name: "/tagged", Tags: map[string]string{"env": "dev"}})).To(Succeed())
+			entry, ok := mgr.Get("/tagged")
+			Expect(ok).To(BeTrue())
+			entry.Tags["env"] = "prod"
+			entries := mgr.GetAll()
+			entries[0].Tags["extra"] = "value"
+			stored, ok := mgr.Get("/tagged")
+			Expect(ok).To(BeTrue())
+			Expect(stored.Tags).To(Equal(map[string]string{"env": "dev"}))
+		})
+	})
+
 	Describe("Region and account isolation", func() {
 		It("uses separate cache files per (region, account) tuple", func() {
 			cfg := &config.Config{CacheTTL: 1 * time.Hour}
@@ -320,7 +346,7 @@ var _ = Describe("matchGlob", func() {
 		Entry("'/prod*' prefix-matches", "/prod*", "/prod/x", true),
 		Entry("'*key' suffix-matches", "*key", "/api/key", true),
 		Entry("'*key' rejects when suffix doesn't match", "*key", "/api/secret", false),
-		Entry("plain string is treated as 'contains'", "plain", "/no-plain", true),
-		Entry("plain string rejects when substring absent", "plain", "/no-other", false),
+		Entry("plain string is exact", "plain", "/no-plain", false),
+		Entry("plain string exact match", "plain", "plain", true),
 	)
 })

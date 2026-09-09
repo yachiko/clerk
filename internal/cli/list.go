@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 	"text/tabwriter"
 	"time"
@@ -14,6 +15,7 @@ import (
 	"github.com/yachiko/clerk/internal/aws"
 	"github.com/yachiko/clerk/internal/cache"
 	"github.com/yachiko/clerk/internal/config"
+	"github.com/yachiko/clerk/internal/parammatch"
 )
 
 var (
@@ -63,6 +65,9 @@ func runList(cmd *cobra.Command, args []string) error {
 	path := "/*"
 	if len(args) > 0 {
 		path = args[0]
+	}
+	if _, err := parammatch.Match(path, ""); err != nil {
+		return err
 	}
 
 	// Load config
@@ -118,13 +123,12 @@ func runList(cmd *cobra.Command, args []string) error {
 		entries = cacheMgr.Search(path)
 		if len(entries) > 0 {
 			entries = cacheMgr.Sort(entries, sortBy)
-			return outputList(entries, sortBy)
+			return outputList(entries, sortBy, listShowTags)
 		}
 	}
 
 	// Cache miss or expired - fetch from AWS
-	basePath := extractBasePath(path)
-	params, err := client.ListParameters(ctx, basePath, true)
+	params, err := client.ListParameters(ctx, path, true)
 	if err != nil {
 		return fmt.Errorf("failed to list parameters: %w", err)
 	}
@@ -140,6 +144,16 @@ func runList(cmd *cobra.Command, args []string) error {
 				LastModifiedDate: p.LastModifiedDate,
 				Tags:             p.Tags,
 			}
+			if listShowTags {
+				tags, tagErr := client.GetParameterTags(ctx, p.Name)
+				entry.TagsFetchedAt = time.Now()
+				if tagErr != nil {
+					entry.TagsError = tagErr.Error()
+				} else {
+					entry.Tags = tags
+					entry.TagsComplete = true
+				}
+			}
 			entries = append(entries, entry)
 		}
 	}
@@ -147,7 +161,7 @@ func runList(cmd *cobra.Command, args []string) error {
 	// Sort
 	entries = cacheMgr.Sort(entries, sortBy)
 
-	return outputList(entries, sortBy)
+	return outputList(entries, sortBy, listShowTags)
 }
 
 // extractBasePath extracts the base path for API call
@@ -165,26 +179,8 @@ func extractBasePath(pattern string) string {
 
 // matchPath checks if a name matches the path pattern
 func matchPath(pattern, name string) bool {
-	if pattern == "" || pattern == "/*" || pattern == "/" {
-		return true
-	}
-
-	if strings.HasSuffix(pattern, "/*") {
-		prefix := strings.TrimSuffix(pattern, "/*")
-		return strings.HasPrefix(name, prefix+"/") || name == prefix
-	}
-
-	if strings.HasPrefix(pattern, "*") && strings.HasSuffix(pattern, "*") {
-		substr := strings.Trim(pattern, "*")
-		return strings.Contains(name, substr)
-	}
-
-	if strings.HasSuffix(pattern, "*") {
-		prefix := strings.TrimSuffix(pattern, "*")
-		return strings.HasPrefix(name, prefix)
-	}
-
-	return pattern == name
+	ok, err := parammatch.Match(pattern, name)
+	return err == nil && ok
 }
 
 // normalizeSortOption normalizes sort option aliases
@@ -202,7 +198,8 @@ func normalizeSortOption(sort string) string {
 }
 
 // outputList outputs the parameter list
-func outputList(entries []cache.CacheEntry, sortBy string) error {
+func outputList(entries []cache.CacheEntry, sortBy string, showTagsArg ...bool) error {
+	showTags := len(showTagsArg) > 0 && showTagsArg[0]
 	if globalOpts.Output == "json" {
 		encoder := json.NewEncoder(os.Stdout)
 		encoder.SetIndent("", "  ")
@@ -216,16 +213,43 @@ func outputList(entries []cache.CacheEntry, sortBy string) error {
 	}
 
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	_, _ = fmt.Fprintln(w, "NAME\tTYPE\tVERSION\tMODIFIED")
+	header := "NAME\tTYPE\tVERSION\tMODIFIED"
+	if showTags {
+		header += "\tTAGS"
+	}
+	_, _ = fmt.Fprintln(w, header)
 	_, _ = fmt.Fprintln(w, strings.Repeat("-", 70))
 
 	for _, entry := range entries {
 		modified := entry.LastModifiedDate.Format("2006-01-02 15:04")
-		_, _ = fmt.Fprintf(w, "%s\t%s\t%d\t%s\n", entry.Name, entry.Type, entry.Version, modified)
+		if showTags {
+			tags := formatListTags(entry)
+			_, _ = fmt.Fprintf(w, "%s\t%s\t%d\t%s\t%s\n", entry.Name, entry.Type, entry.Version, modified, tags)
+		} else {
+			_, _ = fmt.Fprintf(w, "%s\t%s\t%d\t%s\n", entry.Name, entry.Type, entry.Version, modified)
+		}
 	}
 
 	_ = w.Flush()
 
 	fmt.Fprintf(os.Stderr, "\nTotal: %d parameters\n", len(entries))
 	return nil
+}
+
+func formatListTags(entry cache.CacheEntry) string {
+	if entry.TagsError != "" {
+		return "<unavailable: " + entry.TagsError + ">"
+	}
+	if !entry.TagsComplete {
+		return "<unavailable>"
+	}
+	if len(entry.Tags) == 0 {
+		return "-"
+	}
+	parts := make([]string, 0, len(entry.Tags))
+	for key, value := range entry.Tags {
+		parts = append(parts, key+"="+value)
+	}
+	sort.Strings(parts)
+	return strings.Join(parts, ",")
 }
