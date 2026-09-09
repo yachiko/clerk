@@ -27,6 +27,7 @@ type Model struct {
 	ready       bool
 	quitting    bool
 	refreshing  bool
+	refreshCancel context.CancelFunc
 }
 
 // NewModel creates a new browse model
@@ -94,22 +95,20 @@ func (m Model) checkBackgroundRefresh() tea.Msg {
 }
 
 // doBackgroundRefresh performs cache refresh in background with live progress
-func (m Model) doBackgroundRefresh() tea.Cmd {
+func (m Model) doBackgroundRefresh(ctx context.Context) tea.Cmd {
 	return func() tea.Msg {
 		// This will be replaced by the streaming version
-		return startRefreshWithProgress(m.cache, m.client, m.config)
+		return startRefreshWithProgress(ctx, m.cache, m.client, m.config)
 	}
 }
 
 // startRefreshWithProgress starts the refresh and returns a sub for progress updates
-func startRefreshWithProgress(cacheMgr *cache.Manager, client *aws.Client, cfg *config.Config) tea.Msg {
+func startRefreshWithProgress(ctx context.Context, cacheMgr *cache.Manager, client *aws.Client, cfg *config.Config) tea.Msg {
 	// Create a channel for progress
 	progressCh := make(chan refreshEvent, 100)
 
 	// Start refresh in background
 	go func() {
-		ctx := context.Background()
-
 		progressCallback := func(current, total int) {
 			select {
 			case progressCh <- refreshEvent{current: current}:
@@ -407,13 +406,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.refreshing = true
+		refreshCtx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		m.refreshCancel = cancel
 		// Show appropriate message based on whether cache is empty
 		if len(m.state.Entries) == 0 {
 			m.state.StatusMessage = "Loading parameters from AWS..."
 		} else {
 			m.state.StatusMessage = "Refreshing cache in background..."
 		}
-		return m, m.doBackgroundRefresh()
+		return m, m.doBackgroundRefresh(refreshCtx)
 
 	case refreshProgressChannelMsg:
 		// Start listening for progress updates
@@ -430,6 +431,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, waitForProgress(msg.ch)
 
 	case backgroundRefreshCompleteMsg:
+		if m.refreshCancel != nil { m.refreshCancel(); m.refreshCancel = nil }
 		m.refreshing = false
 		if msg.err != nil {
 			if len(m.state.Entries) > 0 {
@@ -575,7 +577,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if current.Version != msg.original.Version {
 				return editCompleteMsg{err: fmt.Errorf("parameter changed from version %d to %d while editing; review and retry", msg.original.Version, current.Version)}
 			}
-			output, err := m.client.PutParameter(ctx, &aws.PutParameterInput{Name: msg.name, Value: newValue, Type: msg.original.Type, Overwrite: true})
+			output, err := m.client.PutParameter(ctx, &aws.PutParameterInput{Name: msg.name, Value: newValue, Type: msg.original.Type, Overwrite: true, KMSKeyID: msg.original.KMSKeyID, Description: msg.original.Description, Tier: msg.original.Tier, AllowedPattern: msg.original.AllowedPattern, Policies: msg.original.Policies, DataType: msg.original.DataType})
 			if err != nil {
 				return editCompleteMsg{err: fmt.Errorf("failed to update: %w", err)}
 			}
@@ -604,9 +606,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		// Remove from cache
-		_ = m.cache.Delete(msg.source)
+		if err := m.cache.Delete(msg.source); err != nil { msg.warning = "remote move succeeded but cache delete failed: " + err.Error() }
 		if msg.destination != nil {
-			_ = m.cache.Update(cache.CacheEntry{Name: msg.destination.Name, Type: msg.destination.Type, Version: msg.destination.Version, LastModifiedDate: msg.destination.LastModifiedDate, Tags: msg.destination.Tags})
+			if err := m.cache.Update(cache.CacheEntry{Name: msg.destination.Name, Type: msg.destination.Type, Version: msg.destination.Version, LastModifiedDate: msg.destination.LastModifiedDate, Tags: msg.destination.Tags, TagsComplete: true, TagsFetchedAt: time.Now()}); err != nil { msg.warning = "remote move succeeded but cache update failed: " + err.Error() }
 		}
 
 		// Reload entries from cache
@@ -627,7 +629,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		if msg.destination != nil {
-			_ = m.cache.Update(cache.CacheEntry{Name: msg.destination.Name, Type: msg.destination.Type, Version: msg.destination.Version, LastModifiedDate: msg.destination.LastModifiedDate, Tags: msg.destination.Tags})
+			if err := m.cache.Update(cache.CacheEntry{Name: msg.destination.Name, Type: msg.destination.Type, Version: msg.destination.Version, LastModifiedDate: msg.destination.LastModifiedDate, Tags: msg.destination.Tags, TagsComplete: true, TagsFetchedAt: time.Now()}); err != nil { msg.warning = "remote copy succeeded but cache update failed: " + err.Error() }
 		}
 		// Reload entries from cache
 		status := fmt.Sprintf("Copied %s to %s", msg.source, msg.target)
@@ -772,9 +774,14 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if m.state.Mode == ViewModeDescribe {
+			m.state.DescribeGeneration++
+			m.state.DescribeValue = ""
+			m.state.DescribeHistory = nil
+			m.state.DescribeEntry = nil
 			m.state.Mode = m.state.PreviousMode
 			return m, nil
 		}
+		if m.refreshCancel != nil { m.refreshCancel(); m.refreshCancel = nil }
 		m.quitting = true
 		return m, tea.Quit
 	}
@@ -1047,6 +1054,7 @@ func (m Model) handleDescribeKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.state.DescribeParamName = ""
 		m.state.DescribeValue = ""
 		m.state.DescribeHistory = nil
+		m.state.DescribeEntry = nil
 		m.state.Mode = m.state.PreviousMode
 		// Reset scroll offsets
 		m.state.HistoryScrollOffset = 0
@@ -1680,6 +1688,10 @@ func (m Model) editSecret(name string) tea.Cmd {
 		if err != nil {
 			return editPreparedMsg{err: fmt.Errorf("failed to get parameter: %w", err)}
 		}
+		metadata, err := m.client.GetParameterMetadata(ctx, param.Name)
+		if err != nil { return editPreparedMsg{err: fmt.Errorf("failed to read parameter protection metadata: %w", err)} }
+		param.KMSKeyID, param.Description, param.Tier = metadata.KMSKeyID, metadata.Description, metadata.Tier
+		param.AllowedPattern, param.Policies, param.DataType = metadata.AllowedPattern, metadata.Policies, metadata.DataType
 
 		// Determine file extension based on content
 		ext := ".txt"
@@ -1730,86 +1742,22 @@ func (m Model) deleteSecret(name string) tea.Cmd {
 // moveSecret moves/renames a parameter
 func (m Model) moveSecret(source, target string) tea.Cmd {
 	return func() tea.Msg {
-		if source == target {
-			return moveCompleteMsg{source: source, target: target, err: fmt.Errorf("source and destination are the same parameter")}
-		}
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-
-		// Get source parameter
-		param, err := m.client.GetParameter(ctx, source, true)
-		if err != nil {
-			return moveCompleteMsg{source: source, target: target, err: fmt.Errorf("failed to get source: %w", err)}
-		}
-
-		// Create new parameter at target location
-		input := &aws.PutParameterInput{
-			Name:      target,
-			Value:     param.Value,
-			Type:      param.Type,
-			Overwrite: true,
-		}
-		if len(param.Tags) > 0 {
-			input.Tags = param.Tags
-		}
-
-		_, err = m.client.PutParameter(ctx, input)
-		if err != nil {
-			return moveCompleteMsg{source: source, target: target, err: fmt.Errorf("failed to create target: %w", err)}
-		}
-
-		// Delete source parameter
-		err = m.client.DeleteParameter(ctx, source)
-		if err != nil {
-			return moveCompleteMsg{source: source, target: target, err: fmt.Errorf("failed to delete source: %w", err)}
-		}
-
-		destination, getErr := m.client.GetParameter(ctx, target, false)
-		warning := ""
-		if getErr != nil {
-			warning = getErr.Error()
-		}
-		return moveCompleteMsg{source: source, target: target, destination: destination, warning: warning}
+		result, err := m.client.Transfer(ctx, aws.TransferInput{Source: source, Destination: target, Move: true})
+		msg := moveCompleteMsg{source: source, target: target, destination: result.Destination, err: err}
+		if result.DestinationWritten && !result.SourceDeleted { msg.warning = "destination was created; source was retained: " + err.Error(); msg.err = nil }
+		return msg
 	}
 }
 
 // copySecretAs copies a parameter to a new name
 func (m Model) copySecretAs(source, target string) tea.Cmd {
 	return func() tea.Msg {
-		if source == target {
-			return copyCompleteMsg{source: source, target: target, err: fmt.Errorf("source and destination are the same parameter")}
-		}
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-
-		// Get source parameter
-		param, err := m.client.GetParameter(ctx, source, true)
-		if err != nil {
-			return copyCompleteMsg{source: source, target: target, err: fmt.Errorf("failed to get source: %w", err)}
-		}
-
-		// Create new parameter at target location
-		input := &aws.PutParameterInput{
-			Name:      target,
-			Value:     param.Value,
-			Type:      param.Type,
-			Overwrite: true,
-		}
-		if len(param.Tags) > 0 {
-			input.Tags = param.Tags
-		}
-
-		_, err = m.client.PutParameter(ctx, input)
-		if err != nil {
-			return copyCompleteMsg{source: source, target: target, err: fmt.Errorf("failed to copy: %w", err)}
-		}
-
-		destination, getErr := m.client.GetParameter(ctx, target, false)
-		warning := ""
-		if getErr != nil {
-			warning = getErr.Error()
-		}
-		return copyCompleteMsg{source: source, target: target, destination: destination, warning: warning}
+		result, err := m.client.Transfer(ctx, aws.TransferInput{Source: source, Destination: target})
+		return copyCompleteMsg{source: source, target: target, destination: result.Destination, err: err}
 	}
 }
 

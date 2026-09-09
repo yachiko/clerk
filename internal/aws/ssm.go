@@ -103,7 +103,10 @@ func (c *Client) GetParameter(ctx context.Context, name string, withDecryption b
 	return param, nil
 }
 
-func (c *Client) getParameterMetadata(ctx context.Context, name string) (*Parameter, error) {
+// GetParameterMetadata retrieves protection and write-affecting fields without
+// retrieving a parameter value. Callers that overwrite existing parameters use
+// it to preserve the existing protection policy.
+func (c *Client) GetParameterMetadata(ctx context.Context, name string) (*Parameter, error) {
 	output, err := c.ssm.DescribeParameters(ctx, &ssm.DescribeParametersInput{ParameterFilters: []types.ParameterStringFilter{{Key: aws.String("Name"), Values: []string{name}}}})
 	if err != nil {
 		return nil, fmt.Errorf("failed to describe parameter: %w", err)
@@ -238,7 +241,7 @@ func (c *Client) Transfer(ctx context.Context, input TransferInput) (TransferRes
 	}
 	// Metadata and tags are part of a faithful transfer. Unlike ordinary reads,
 	// do not silently drop them when authorization is missing.
-	metadata, err := c.getParameterMetadata(ctx, source.Name)
+	metadata, err := c.GetParameterMetadata(ctx, source.Name)
 	if err != nil {
 		return result, fmt.Errorf("read source metadata: %w", err)
 	}
