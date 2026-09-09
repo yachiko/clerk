@@ -3,7 +3,33 @@ package cli
 import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	"os"
+	"path/filepath"
 )
+
+var _ = Describe("value input modes", func() {
+	It("preserves every byte from an explicit file", func() {
+		path := filepath.Join(GinkgoT().TempDir(), "value")
+		want := "  leading\\ncertificate\\n\\t"
+		Expect(os.WriteFile(path, []byte(want), 0600)).To(Succeed())
+		got, err := resolveValue("ignored", path, false, os.Stdin)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(got).To(Equal(want))
+	})
+
+	It("treats a positional filename as a literal", func() {
+		path := filepath.Join(GinkgoT().TempDir(), "existing")
+		Expect(os.WriteFile(path, []byte("different"), 0600)).To(Succeed())
+		got, err := resolveValue(path, "", false, os.Stdin)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(got).To(Equal(path))
+	})
+
+	It("rejects a missing explicit file", func() {
+		_, err := resolveValue("ignored", filepath.Join(GinkgoT().TempDir(), "missing"), false, os.Stdin)
+		Expect(err).To(HaveOccurred())
+	})
+})
 
 var _ = Describe("parseTags", func() {
 	DescribeTable("parses tag strings",

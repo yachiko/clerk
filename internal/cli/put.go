@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"time"
@@ -19,12 +20,14 @@ var (
 	putTags     string
 	putType     string
 	putKMSKeyID string
+	putFile     string
+	putStdin    bool
 )
 
 // InitPutCommand initializes the PUT command
 func InitPutCommand() *cobra.Command {
 	putCmd := &cobra.Command{
-		Use:   "put <name> <value|file>",
+		Use:   "put <name> <value>",
 		Short: "Create or update a secret in AWS Parameter Store",
 		Long: `Create a new secret or update an existing one in AWS Parameter Store.
 
@@ -53,6 +56,8 @@ Examples:
 	putCmd.Flags().StringVar(&putTags, "tags", "", "Tags in format key1=value1,key2=value2")
 	putCmd.Flags().StringVar(&putType, "type", "", "Parameter type: String, StringList, SecureString")
 	putCmd.Flags().StringVar(&putKMSKeyID, "kms-key-id", "", "KMS key ID for SecureString encryption")
+	putCmd.Flags().StringVar(&putFile, "file", "", "Read an exact value from this file")
+	putCmd.Flags().BoolVar(&putStdin, "stdin", false, "Read an exact value from standard input")
 
 	return putCmd
 }
@@ -76,19 +81,7 @@ func runPut(cmd *cobra.Command, args []string) error {
 	}
 	cfg := cfgMgr.Get()
 
-	// Determine parameter type
-	paramType := putType
-	if paramType == "" {
-		paramType = cfg.DefaultType
-	}
-
-	// Validate parameter type
-	if !isValidParamType(paramType) {
-		return fmt.Errorf("invalid parameter type: %s (valid: String, StringList, SecureString)", paramType)
-	}
-
-	// Resolve value (from file or direct)
-	value, err := resolveValue(valueOrFile)
+	value, err := resolveValue(valueOrFile, putFile, putStdin, os.Stdin)
 	if err != nil {
 		return fmt.Errorf("failed to resolve value: %w", err)
 	}
@@ -119,8 +112,21 @@ func runPut(cmd *cobra.Command, args []string) error {
 	}
 
 	// Check if parameter exists (to determine if we're creating or updating)
-	_, err = client.GetParameter(ctx, name, false)
+	existing, err := client.GetParameter(ctx, name, false)
 	isUpdate := err == nil
+	if err != nil && !aws.IsParameterNotFoundError(err) {
+		return fmt.Errorf("failed to check existing parameter: %w", err)
+	}
+	paramType := putType
+	if paramType == "" && existing != nil {
+		paramType = existing.Type
+	}
+	if paramType == "" {
+		paramType = cfg.DefaultType
+	}
+	if !isValidParamType(paramType) {
+		return fmt.Errorf("invalid parameter type: %s (valid: String, StringList, SecureString)", paramType)
+	}
 
 	// Prepare input
 	input := &aws.PutParameterInput{
@@ -184,20 +190,25 @@ func runPut(cmd *cobra.Command, args []string) error {
 }
 
 // resolveValue resolves the value from a file path or returns it directly
-func resolveValue(valueOrFile string) (string, error) {
-	// Check if it's a file path
-	info, err := os.Stat(valueOrFile)
-	if err == nil && !info.IsDir() {
-		// It's a file, read its contents
-		data, err := os.ReadFile(valueOrFile)
-		if err != nil {
-			return "", fmt.Errorf("failed to read file: %w", err)
-		}
-		return strings.TrimSpace(string(data)), nil
+func resolveValue(literal, file string, stdin bool, in *os.File) (string, error) {
+	if file != "" && stdin {
+		return "", fmt.Errorf("--file and --stdin cannot be used together")
 	}
-
-	// Return as direct value
-	return valueOrFile, nil
+	if file != "" {
+		data, err := os.ReadFile(file)
+		if err != nil {
+			return "", fmt.Errorf("read --file %q: %w", file, err)
+		}
+		return string(data), nil
+	}
+	if stdin {
+		data, err := io.ReadAll(in)
+		if err != nil {
+			return "", fmt.Errorf("read --stdin: %w", err)
+		}
+		return string(data), nil
+	}
+	return literal, nil
 }
 
 // parseTags parses tags from string format "key1=value1,key2=value2"

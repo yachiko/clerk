@@ -14,6 +14,7 @@ import (
 )
 
 var moveForce bool
+var moveOverwrite bool
 
 // InitMoveCommand initializes the MOVE command
 func InitMoveCommand() *cobra.Command {
@@ -22,9 +23,8 @@ func InitMoveCommand() *cobra.Command {
 		Short: "Move a secret in AWS Parameter Store",
 		Long: `Move (rename) a secret in AWS Parameter Store.
 
-This is effectively a copy followed by a delete.
-Tags are NOT copied (AWS parameter tag limitations).
-If the delete fails, the source parameter is NOT deleted (rollback).
+This is a verified copy followed by a source deletion. It preserves supported
+metadata and leaves both parameters in place if source deletion fails.
 
 Requires confirmation unless --force is provided.
 
@@ -42,13 +42,13 @@ Examples:
 	}
 
 	moveCmd.Flags().BoolVar(&moveForce, "force", false, "Skip confirmation prompt")
+	moveCmd.Flags().BoolVar(&moveOverwrite, "overwrite", false, "Replace an existing destination")
 
 	return moveCmd
 }
 
 func runMove(cmd *cobra.Command, args []string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
+	ctx := context.Background()
 
 	source := args[0]
 	destination := args[1]
@@ -86,53 +86,30 @@ func runMove(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to create AWS client: %w", err)
 	}
 
-	// Get source parameter
-	sourceParam, err := client.GetParameter(ctx, source, false)
-	if err != nil {
-		if aws.IsParameterNotFoundError(err) {
-			return fmt.Errorf("source parameter not found: %s", source)
-		}
-		return fmt.Errorf("failed to get source parameter: %w", err)
-	}
-
 	// Confirm if not force
-	if !moveForce && globalOpts.Output != "json" {
-		fmt.Printf("You are about to move parameter: %s\n", source)
-		fmt.Printf("To destination: %s\n", destination)
-		fmt.Print("Type 'move' to confirm: ")
+	if !moveForce {
+		if globalOpts.Output == "json" {
+			return fmt.Errorf("--force is required for a move with JSON output")
+		}
+		fmt.Fprintf(os.Stderr, "You are about to move parameter: %s\n", source)
+		fmt.Fprintf(os.Stderr, "To destination: %s\n", destination)
+		fmt.Fprint(os.Stderr, "Type 'move' to confirm: ")
 
 		var confirmation string
 		_, _ = fmt.Scanln(&confirmation)
 
 		if confirmation != "move" {
-			fmt.Println("Cancelled.")
+			fmt.Fprintln(os.Stderr, "Cancelled.")
 			return nil
 		}
 	}
-
-	// Copy parameter
-	input := &aws.PutParameterInput{
-		Name:      destination,
-		Value:     sourceParam.Value,
-		Type:      sourceParam.Type,
-		Overwrite: true,
-	}
-
-	_, err = client.PutParameter(ctx, input)
+	// The destructive-operation deadline starts after the human decision, so a
+	// slow prompt cannot consume the time budget for the remote mutation.
+	transferCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	transfer, err := client.Transfer(transferCtx, aws.TransferInput{Source: source, Destination: destination, Move: true, Overwrite: moveOverwrite})
 	if err != nil {
-		return fmt.Errorf("failed to copy parameter: %w", err)
-	}
-
-	// Delete source parameter (if copy succeeded)
-	err = client.DeleteParameter(ctx, source)
-	if err != nil {
-		// Rollback: try to delete the destination we just created
-		deleteErr := client.DeleteParameter(ctx, destination)
-		if deleteErr == nil {
-			return fmt.Errorf("failed to delete source parameter (rolled back copy): %w", err)
-		}
-		// If rollback also failed, report both errors
-		return fmt.Errorf("failed to delete source parameter: %w (rollback also failed: %v)", err, deleteErr)
+		return fmt.Errorf("move incomplete: %w", err)
 	}
 
 	// Update cache with region and account ID
@@ -159,7 +136,9 @@ func runMove(cmd *cobra.Command, args []string) error {
 		result := map[string]interface{}{
 			"source":      source,
 			"destination": destination,
-			"type":        sourceParam.Type,
+			"type":        transfer.Source.Type,
+			"account_id":  client.GetAccountID(),
+			"region":      client.GetRegion(),
 			"message":     "Parameter moved successfully",
 		}
 		encoder := json.NewEncoder(os.Stdout)
@@ -170,6 +149,8 @@ func runMove(cmd *cobra.Command, args []string) error {
 	fmt.Printf("✓ Parameter moved\n")
 	fmt.Printf("  From: %s\n", source)
 	fmt.Printf("  To:   %s\n", destination)
+	fmt.Printf("  Account: %s\n", client.GetAccountID())
+	fmt.Printf("  Region:  %s\n", client.GetRegion())
 
 	return nil
 }

@@ -87,6 +87,13 @@ var _ = Describe("PutParameter input/output types", func() {
 	})
 })
 
+var _ = Describe("canonicalParameterName", func() {
+	It("normalizes an SSM parameter ARN and selector", func() {
+		Expect(canonicalParameterName("arn:aws:ssm:us-east-1:123:parameter/team/key")).To(Equal("/team/key"))
+		Expect(canonicalParameterName("/team/key:3")).To(Equal("/team/key"))
+	})
+})
+
 var _ = Describe("Label input/output types", func() {
 	It("round-trips LabelParameterInput", func() {
 		in := LabelParameterInput{Name: "/p", Version: 3, Labels: []string{"prod"}}

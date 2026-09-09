@@ -12,6 +12,11 @@ type Parameter struct {
 	ARN              string            `json:"arn,omitempty"`
 	DataType         string            `json:"data_type,omitempty"`
 	Tags             map[string]string `json:"tags,omitempty"`
+	Description      string            `json:"description,omitempty"`
+	KMSKeyID         string            `json:"kms_key_id,omitempty"`
+	Tier             string            `json:"tier,omitempty"`
+	AllowedPattern   string            `json:"allowed_pattern,omitempty"`
+	Policies         string            `json:"policies,omitempty"`
 }
 
 // ParameterMetadata represents metadata without the value
@@ -35,17 +40,40 @@ type ParameterHistory struct {
 
 // PutParameterInput represents input for creating/updating a parameter
 type PutParameterInput struct {
-	Name      string
-	Value     string
-	Type      string
-	Overwrite bool
-	KMSKeyID  string
-	Tags      map[string]string
+	Name           string
+	Value          string
+	Type           string
+	Overwrite      bool
+	KMSKeyID       string
+	Tags           map[string]string
+	Description    string
+	Tier           string
+	AllowedPattern string
+	Policies       string
+	DataType       string
 }
 
 // PutParameterOutput represents output from put operation
 type PutParameterOutput struct {
 	Version int64
+}
+
+// TransferInput describes a safe copy or move. Transfers create destinations by
+// default; replacing an existing parameter requires Overwrite.
+type TransferInput struct {
+	Source      string
+	Destination string
+	Move        bool
+	Overwrite   bool
+}
+
+// TransferResult records the completed remote steps. A non-nil error can be
+// returned with DestinationWritten true when a move could not delete its source.
+type TransferResult struct {
+	Source             *Parameter
+	Destination        *Parameter
+	DestinationWritten bool
+	SourceDeleted      bool
 }
 
 // LabelParameterInput represents input for labeling a parameter version

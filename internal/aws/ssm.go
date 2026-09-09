@@ -2,6 +2,7 @@ package aws
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -102,8 +103,36 @@ func (c *Client) GetParameter(ctx context.Context, name string, withDecryption b
 	if err == nil {
 		param.Tags = tags
 	}
+	if metadata, err := c.getParameterMetadata(ctx, aws.ToString(p.Name)); err == nil {
+		param.Description = metadata.Description
+		param.KMSKeyID = metadata.KMSKeyID
+		param.Tier = metadata.Tier
+		param.AllowedPattern = metadata.AllowedPattern
+		param.Policies = metadata.Policies
+		if metadata.DataType != "" {
+			param.DataType = metadata.DataType
+		}
+	}
 
 	return param, nil
+}
+
+func (c *Client) getParameterMetadata(ctx context.Context, name string) (*Parameter, error) {
+	output, err := c.ssm.DescribeParameters(ctx, &ssm.DescribeParametersInput{ParameterFilters: []types.ParameterStringFilter{{Key: aws.String("Name"), Values: []string{name}}}})
+	if err != nil {
+		return nil, fmt.Errorf("failed to describe parameter: %w", err)
+	}
+	for _, p := range output.Parameters {
+		if aws.ToString(p.Name) != name {
+			continue
+		}
+		policies, err := json.Marshal(p.Policies)
+		if err != nil {
+			return nil, fmt.Errorf("failed to encode parameter policies: %w", err)
+		}
+		return &Parameter{Name: aws.ToString(p.Name), Type: string(p.Type), ARN: aws.ToString(p.ARN), DataType: aws.ToString(p.DataType), Description: aws.ToString(p.Description), KMSKeyID: aws.ToString(p.KeyId), Tier: string(p.Tier), AllowedPattern: aws.ToString(p.AllowedPattern), Policies: string(policies)}, nil
+	}
+	return nil, fmt.Errorf("parameter metadata not found: %s", name)
 }
 
 // GetParameterByVersion retrieves a specific version of a parameter
@@ -162,6 +191,21 @@ func (c *Client) PutParameter(ctx context.Context, input *PutParameterInput) (*P
 	if input.KMSKeyID != "" && input.Type == "SecureString" {
 		ssmInput.KeyId = aws.String(input.KMSKeyID)
 	}
+	if input.Description != "" {
+		ssmInput.Description = aws.String(input.Description)
+	}
+	if input.Tier != "" {
+		ssmInput.Tier = types.ParameterTier(input.Tier)
+	}
+	if input.AllowedPattern != "" {
+		ssmInput.AllowedPattern = aws.String(input.AllowedPattern)
+	}
+	if input.Policies != "" {
+		ssmInput.Policies = aws.String(input.Policies)
+	}
+	if input.DataType != "" {
+		ssmInput.DataType = aws.String(input.DataType)
+	}
 
 	if len(input.Tags) > 0 && !input.Overwrite {
 		var tags []types.Tag
@@ -178,10 +222,95 @@ func (c *Client) PutParameter(ctx context.Context, input *PutParameterInput) (*P
 	if err != nil {
 		return nil, fmt.Errorf("failed to put parameter: %w", err)
 	}
+	// PutParameter ignores tags on an overwrite. Apply supplied tags only after
+	// the value write succeeds so callers can report a truthful partial result.
+	if input.Overwrite && len(input.Tags) > 0 {
+		var tags []types.Tag
+		for k, v := range input.Tags {
+			tags = append(tags, types.Tag{Key: aws.String(k), Value: aws.String(v)})
+		}
+		if _, err := c.ssm.AddTagsToResource(ctx, &ssm.AddTagsToResourceInput{ResourceType: types.ResourceTypeForTaggingParameter, ResourceId: aws.String(input.Name), Tags: tags}); err != nil {
+			return nil, fmt.Errorf("parameter value was written but tags were not updated: %w", err)
+		}
+	}
 
 	return &PutParameterOutput{
 		Version: output.Version,
 	}, nil
+}
+
+// Transfer copies decrypted source bytes and supported destination metadata. It
+// never deletes a destination as rollback; callers receive a partial outcome.
+func (c *Client) Transfer(ctx context.Context, input TransferInput) (TransferResult, error) {
+	result := TransferResult{}
+	if canonicalParameterName(input.Source) == canonicalParameterName(input.Destination) {
+		return result, fmt.Errorf("source and destination identify the same parameter")
+	}
+	source, err := c.GetParameter(ctx, input.Source, true)
+	if err != nil {
+		return result, fmt.Errorf("read source (including decryption): %w", err)
+	}
+	// Metadata and tags are part of a faithful transfer. Unlike ordinary reads,
+	// do not silently drop them when authorization is missing.
+	metadata, err := c.getParameterMetadata(ctx, source.Name)
+	if err != nil {
+		return result, fmt.Errorf("read source metadata: %w", err)
+	}
+	source.Description, source.KMSKeyID, source.Tier = metadata.Description, metadata.KMSKeyID, metadata.Tier
+	source.AllowedPattern, source.Policies, source.DataType = metadata.AllowedPattern, metadata.Policies, metadata.DataType
+	source.Tags, err = c.GetParameterTags(ctx, source.Name)
+	if err != nil {
+		return result, fmt.Errorf("read source tags: %w", err)
+	}
+	result.Source = source
+	if source.Name == canonicalParameterName(input.Destination) {
+		return result, fmt.Errorf("source and destination identify the same parameter")
+	}
+	destination, err := c.GetParameter(ctx, input.Destination, false)
+	if err == nil && !input.Overwrite {
+		return result, fmt.Errorf("destination already exists: %s (use --overwrite to replace it)", input.Destination)
+	}
+	if err != nil && !IsParameterNotFoundError(err) {
+		return result, fmt.Errorf("check destination: %w", err)
+	}
+	put := &PutParameterInput{Name: input.Destination, Value: source.Value, Type: source.Type, Overwrite: destination != nil, KMSKeyID: source.KMSKeyID, Tags: source.Tags, Description: source.Description, Tier: source.Tier, AllowedPattern: source.AllowedPattern, Policies: source.Policies, DataType: source.DataType}
+	if _, err := c.PutParameter(ctx, put); err != nil {
+		return result, fmt.Errorf("write destination: %w", err)
+	}
+	result.DestinationWritten = true
+	verified, err := c.GetParameter(ctx, input.Destination, true)
+	if err != nil {
+		return result, fmt.Errorf("destination was written but could not be verified: %w", err)
+	}
+	result.Destination = verified
+	if verified.Type != source.Type || verified.Value != source.Value {
+		return result, fmt.Errorf("destination was written but verification failed; source retained")
+	}
+	if !input.Move {
+		return result, nil
+	}
+	current, err := c.GetParameter(ctx, input.Source, true)
+	if err != nil {
+		return result, fmt.Errorf("destination verified but source could not be rechecked; source retained: %w", err)
+	}
+	if current.Version != source.Version || current.Value != source.Value {
+		return result, fmt.Errorf("destination verified but source changed during transfer; source retained")
+	}
+	if err := c.DeleteParameter(ctx, input.Source); err != nil {
+		return result, fmt.Errorf("destination verified but failed to delete source; both parameters remain: %w", err)
+	}
+	result.SourceDeleted = true
+	return result, nil
+}
+
+func canonicalParameterName(name string) string {
+	if i := strings.Index(name, ":parameter/"); i >= 0 {
+		return "/" + strings.TrimPrefix(name[i+len(":parameter/"):], "/")
+	}
+	if i := strings.LastIndex(name, ":"); i > 0 {
+		return name[:i]
+	}
+	return name
 }
 
 // DeleteParameter deletes a parameter

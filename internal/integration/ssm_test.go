@@ -171,12 +171,8 @@ var _ = Describe("clerk against moto", func() {
 	})
 
 	Describe("cp", func() {
-		// SecureString round-trips through moto break here because moto's mock
-		// encryption prepends "kms:alias/aws/ssm:" when withDecryption=false,
-		// and clerk's cp reads with withDecryption=false on purpose. Use String
-		// type to dodge the moto quirk; against real AWS this isn't an issue.
 		It("duplicates a parameter to a new path", func() {
-			_, _, err := run30s(home, "put", "/test/cp/src", "the-value", "--type", "String")
+			_, _, err := run30s(home, "put", "/test/cp/src", "the-value")
 			Expect(err).NotTo(HaveOccurred())
 
 			stdout, stderr, err := run30s(home, "cp", "/test/cp/src", "/test/cp/dst")
@@ -193,7 +189,7 @@ var _ = Describe("clerk against moto", func() {
 
 	Describe("mv", func() {
 		It("moves the parameter and source is no longer readable", func() {
-			_, _, err := run30s(home, "put", "/test/mv/src", "movee", "--type", "String")
+			_, _, err := run30s(home, "put", "/test/mv/src", "movee")
 			Expect(err).NotTo(HaveOccurred())
 
 			stdout, stderr, err := run30s(home, "mv", "/test/mv/src", "/test/mv/dst", "--force")

@@ -13,6 +13,8 @@ import (
 	"github.com/yachiko/clerk/internal/config"
 )
 
+var copyOverwrite bool
+
 // InitCopyCommand initializes the COPY command
 func InitCopyCommand() *cobra.Command {
 	copyCmd := &cobra.Command{
@@ -20,10 +22,8 @@ func InitCopyCommand() *cobra.Command {
 		Short: "Copy a secret in AWS Parameter Store",
 		Long: `Copy a secret from source to destination in AWS Parameter Store.
 
-The destination parameter inherits the type from source.
-Tags are NOT copied (AWS parameter tag limitations).
-
-If destination already exists, it will be overwritten.
+The destination inherits supported type, tags, and protection metadata. Existing
+destinations are refused unless --overwrite is explicitly provided.
 
 Examples:
   # Copy a secret
@@ -37,6 +37,7 @@ Examples:
 		Args: cobra.ExactArgs(2),
 		RunE: runCopy,
 	}
+	copyCmd.Flags().BoolVar(&copyOverwrite, "overwrite", false, "Replace an existing destination")
 
 	return copyCmd
 }
@@ -81,24 +82,7 @@ func runCopy(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to create AWS client: %w", err)
 	}
 
-	// Get source parameter
-	sourceParam, err := client.GetParameter(ctx, source, false)
-	if err != nil {
-		if aws.IsParameterNotFoundError(err) {
-			return fmt.Errorf("source parameter not found: %s", source)
-		}
-		return fmt.Errorf("failed to get source parameter: %w", err)
-	}
-
-	// Put destination parameter with same type and value
-	input := &aws.PutParameterInput{
-		Name:      destination,
-		Value:     sourceParam.Value,
-		Type:      sourceParam.Type,
-		Overwrite: true,
-	}
-
-	_, err = client.PutParameter(ctx, input)
+	transfer, err := client.Transfer(ctx, aws.TransferInput{Source: source, Destination: destination, Overwrite: copyOverwrite})
 	if err != nil {
 		return fmt.Errorf("failed to copy parameter: %w", err)
 	}
@@ -128,7 +112,9 @@ func runCopy(cmd *cobra.Command, args []string) error {
 		result := map[string]interface{}{
 			"source":      source,
 			"destination": destination,
-			"type":        sourceParam.Type,
+			"type":        transfer.Source.Type,
+			"account_id":  client.GetAccountID(),
+			"region":      client.GetRegion(),
 			"message":     "Parameter copied successfully",
 		}
 		encoder := json.NewEncoder(os.Stdout)
@@ -139,7 +125,9 @@ func runCopy(cmd *cobra.Command, args []string) error {
 	fmt.Printf("✓ Parameter copied\n")
 	fmt.Printf("  Source:      %s\n", source)
 	fmt.Printf("  Destination: %s\n", destination)
-	fmt.Printf("  Type:        %s\n", sourceParam.Type)
+	fmt.Printf("  Type:        %s\n", transfer.Source.Type)
+	fmt.Printf("  Account:     %s\n", client.GetAccountID())
+	fmt.Printf("  Region:      %s\n", client.GetRegion())
 
 	return nil
 }
