@@ -2,6 +2,50 @@ package aws
 
 import "time"
 
+// ResourceIdentity uniquely qualifies a resource across AWS scopes and
+// backends. Display names are deliberately not part of identity.
+type ResourceIdentity struct {
+	Partition   string  `json:"partition"`
+	AccountID   string  `json:"account_id"`
+	Region      string  `json:"region"`
+	Backend     Backend `json:"backend"`
+	CanonicalID string  `json:"canonical_id"`
+}
+
+// ResourceMetadata contains the backend-neutral identity and presentation name.
+// Provider-specific detail remains on provider-specific models.
+type ResourceMetadata struct {
+	Identity    ResourceIdentity `json:"identity"`
+	DisplayName string           `json:"display_name"`
+}
+
+// ValueKind identifies which member of ResourceValue contains the value.
+type ValueKind string
+
+const (
+	ValueText   ValueKind = "text"
+	ValueBinary ValueKind = "binary"
+)
+
+// ResourceValue represents a retrieved value without coercing binary data to
+// text. Kind remains explicit even when the selected value is empty.
+type ResourceValue struct {
+	Identity ResourceIdentity `json:"identity"`
+	Kind     ValueKind        `json:"kind"`
+	Text     string           `json:"text,omitempty"`
+	Binary   []byte           `json:"binary,omitempty"`
+}
+
+// NewTextValue constructs a text resource value.
+func NewTextValue(identity ResourceIdentity, value string) ResourceValue {
+	return ResourceValue{Identity: identity, Kind: ValueText, Text: value}
+}
+
+// NewBinaryValue constructs a binary resource value and owns a copy of value.
+func NewBinaryValue(identity ResourceIdentity, value []byte) ResourceValue {
+	return ResourceValue{Identity: identity, Kind: ValueBinary, Binary: append([]byte(nil), value...)}
+}
+
 // Parameter represents a secret/parameter from AWS Parameter Store
 type Parameter struct {
 	Name             string            `json:"name"`

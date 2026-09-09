@@ -7,17 +7,15 @@ import (
 	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
-	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/ssm"
 	"github.com/aws/aws-sdk-go-v2/service/ssm/types"
-	"github.com/aws/aws-sdk-go-v2/service/sts"
 	"github.com/yachiko/clerk/internal/parammatch"
 )
 
 // Client wraps the AWS SSM client
 type Client struct {
 	ssm              *ssm.Client
-	sts              *sts.Client
+	partition        string
 	region           string
 	accountID        string
 	describePageSize int32
@@ -36,45 +34,40 @@ type ClientOptions struct {
 
 // NewClient creates a new AWS SSM client
 func NewClient(ctx context.Context, opts ClientOptions) (*Client, error) {
-	var cfgOpts []func(*config.LoadOptions) error
-
-	if opts.Region != "" {
-		cfgOpts = append(cfgOpts, config.WithRegion(opts.Region))
-	}
-	if opts.ProfileSet {
-		cfgOpts = append(cfgOpts, config.WithSharedConfigProfile(opts.Profile))
-	}
-
-	cfg, err := config.LoadDefaultConfig(ctx, cfgOpts...)
+	resolved, err := ResolveContext(ctx, opts)
 	if err != nil {
-		return nil, fmt.Errorf("failed to load AWS config: %w", err)
+		return nil, err
 	}
-	if strings.TrimSpace(cfg.Region) == "" {
+	return NewClientFromContext(resolved, opts)
+}
+
+// NewClientFromContext creates an SSM client without reloading configuration or
+// resolving caller identity.
+func NewClientFromContext(resolved *ResolvedContext, opts ClientOptions) (*Client, error) {
+	if resolved == nil {
+		return nil, fmt.Errorf("resolved AWS context is required")
+	}
+	if strings.TrimSpace(resolved.Region) == "" {
 		return nil, fmt.Errorf("AWS region is not configured; pass --region, set config region, or configure AWS_REGION/a shared AWS profile")
 	}
-
 	pageSize := opts.DescribePageSize
 	if pageSize == 0 {
 		pageSize = 50 // Default to maximum
 	}
 
-	// Create STS client to get account ID
-	stsClient := sts.NewFromConfig(cfg)
-
-	// Get account ID
-	identity, err := stsClient.GetCallerIdentity(ctx, &sts.GetCallerIdentityInput{})
-	if err != nil {
-		return nil, fmt.Errorf("failed to get AWS account ID: %w", err)
-	}
-
 	return &Client{
-		ssm:              ssm.NewFromConfig(cfg),
-		sts:              stsClient,
-		region:           cfg.Region,
-		accountID:        aws.ToString(identity.Account),
+		ssm:              ssm.NewFromConfig(resolved.Config),
+		partition:        resolved.Partition,
+		region:           resolved.Region,
+		accountID:        resolved.AccountID,
 		describePageSize: pageSize,
 		describeMaxItems: opts.DescribeMaxItems,
 	}, nil
+}
+
+// GetPartition returns the AWS partition for this client.
+func (c *Client) GetPartition() string {
+	return c.partition
 }
 
 // GetParameter retrieves a parameter by name
