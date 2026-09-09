@@ -36,9 +36,6 @@ func NewManager() (*Manager, error) {
 		config:     DefaultConfig(),
 	}
 
-	// Set default cache path
-	m.config.CachePath = filepath.Join(configDir, "cache.json")
-
 	// Load existing config if it exists
 	if err := m.load(); err != nil && !os.IsNotExist(err) {
 		return nil, err
@@ -54,7 +51,10 @@ func (m *Manager) load() error {
 		return err
 	}
 
-	return json.Unmarshal(data, m.config)
+	if err := json.Unmarshal(data, m.config); err != nil {
+		return fmt.Errorf("invalid configuration %s: %w; fix the named field or remove the file to restore defaults", m.configPath, err)
+	}
+	return nil
 }
 
 // Save writes configuration to disk
@@ -64,13 +64,38 @@ func (m *Manager) Save() error {
 		return fmt.Errorf("failed to create config directory: %w", err)
 	}
 
+	if err := m.config.Validate(); err != nil {
+		return fmt.Errorf("invalid configuration: %w", err)
+	}
+
 	data, err := json.MarshalIndent(m.config, "", "  ")
 	if err != nil {
 		return fmt.Errorf("failed to marshal config: %w", err)
 	}
 
-	if err := os.WriteFile(m.configPath, data, 0600); err != nil {
-		return fmt.Errorf("failed to write config: %w", err)
+	tmp, err := os.CreateTemp(dir, ".config-*.tmp")
+	if err != nil {
+		return fmt.Errorf("failed to create temporary config: %w", err)
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName)
+	if err := tmp.Chmod(0600); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("failed to secure temporary config: %w", err)
+	}
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("failed to write temporary config: %w", err)
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("failed to sync temporary config: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("failed to close temporary config: %w", err)
+	}
+	if err := os.Rename(tmpName, m.configPath); err != nil {
+		return fmt.Errorf("failed to replace config atomically: %w", err)
 	}
 
 	return nil
@@ -88,8 +113,6 @@ func (m *Manager) GetValue(key string) (string, error) {
 		return m.config.Region, nil
 	case "profile":
 		return m.config.Profile, nil
-	case "cache_path", "cache.path":
-		return m.config.CachePath, nil
 	case "cache_ttl", "cache.ttl":
 		return m.config.CacheTTL.String(), nil
 	case "clipboard_timeout", "clipboard.timeout":
@@ -110,6 +133,12 @@ func (m *Manager) GetValue(key string) (string, error) {
 		return strconv.Itoa(m.config.DescribeVersionBatchSize), nil
 	case "decrypt_by_default", "decrypt.by.default":
 		return strconv.FormatBool(m.config.DecryptByDefault), nil
+	case "browse_auto_refresh", "browse.auto.refresh":
+		return strconv.FormatBool(m.config.BrowseAutoRefresh), nil
+	case "browse_refresh_cooldown", "browse.refresh.cooldown":
+		return m.config.BrowseRefreshCooldown.String(), nil
+	case "cache_path", "cache.path":
+		return "", fmt.Errorf("cache_path is deprecated and ignored; Clerk now uses its managed cache location")
 	default:
 		return "", fmt.Errorf("unknown configuration key: %s", key)
 	}
@@ -117,13 +146,14 @@ func (m *Manager) GetValue(key string) (string, error) {
 
 // SetValue sets a configuration value by key
 func (m *Manager) SetValue(key, value string) error {
+	previous := *m.config
 	switch strings.ToLower(key) {
 	case "region":
 		m.config.Region = value
 	case "profile":
 		m.config.Profile = value
 	case "cache_path", "cache.path":
-		m.config.CachePath = value
+		return fmt.Errorf("cache_path is deprecated and ignored; Clerk now uses its managed cache location")
 	case "cache_ttl", "cache.ttl":
 		d, err := time.ParseDuration(value)
 		if err != nil {
@@ -182,8 +212,24 @@ func (m *Manager) SetValue(key, value string) error {
 			return fmt.Errorf("invalid boolean value for decrypt_by_default: %w", err)
 		}
 		m.config.DecryptByDefault = b
+	case "browse_auto_refresh", "browse.auto.refresh":
+		b, err := strconv.ParseBool(value)
+		if err != nil {
+			return fmt.Errorf("invalid boolean value for browse_auto_refresh: %w", err)
+		}
+		m.config.BrowseAutoRefresh = b
+	case "browse_refresh_cooldown", "browse.refresh.cooldown":
+		d, err := time.ParseDuration(value)
+		if err != nil {
+			return fmt.Errorf("invalid duration format: %w", err)
+		}
+		m.config.BrowseRefreshCooldown = d
 	default:
 		return fmt.Errorf("unknown configuration key: %s", key)
+	}
+	if err := m.config.Validate(); err != nil {
+		*m.config = previous
+		return err
 	}
 	return nil
 }
@@ -193,7 +239,6 @@ func (m *Manager) ListKeys() []string {
 	return []string{
 		"region",
 		"profile",
-		"cache_path",
 		"cache_ttl",
 		"clipboard_timeout",
 		"default_type",
@@ -204,6 +249,8 @@ func (m *Manager) ListKeys() []string {
 		"describe_max_items",
 		"describe_version_batch_size",
 		"decrypt_by_default",
+		"browse_auto_refresh",
+		"browse_refresh_cooldown",
 	}
 }
 

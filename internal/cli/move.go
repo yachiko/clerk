@@ -61,24 +61,9 @@ func runMove(cmd *cobra.Command, args []string) error {
 	cfg := cfgMgr.Get()
 
 	// Create AWS client
-	region := globalOpts.Region
-	if region == "" && cfg.Region != "" {
-		region = cfg.Region
-	}
-	if region == "" {
-		region = "us-east-1"
-	}
-
-	profile := globalOpts.Profile
-	if profile == "" && cfg.Profile != "" {
-		profile = cfg.Profile
-	}
-
-	awsOpts := aws.ClientOptions{
-		Region:           region,
-		Profile:          profile,
-		DescribePageSize: cfg.DescribePageSize,
-		DescribeMaxItems: cfg.DescribeMaxItems,
+	awsOpts, err := resolveAWSOptions(cmd, cfg)
+	if err != nil {
+		return err
 	}
 
 	client, err := aws.NewClient(ctx, awsOpts)

@@ -14,13 +14,9 @@ var _ = Describe("DefaultConfig", func() {
 		cfg = DefaultConfig()
 	})
 
-	It("sets sensible AWS defaults", func() {
-		Expect(cfg.Region).To(Equal("us-east-1"))
+	It("leaves AWS region resolution to the SDK by default", func() {
+		Expect(cfg.Region).To(BeEmpty())
 		Expect(cfg.Profile).To(BeEmpty(), "empty = SDK default, avoids forcing shared-config lookup")
-	})
-
-	It("does not pin a cache path (it's computed at runtime)", func() {
-		Expect(cfg.CachePath).To(BeEmpty())
 	})
 
 	It("uses three-hour cache TTL and one-minute clipboard timeout", func() {
@@ -40,9 +36,9 @@ var _ = Describe("DefaultConfig", func() {
 		Expect(cfg.DescribeVersionBatchSize).To(Equal(10))
 	})
 
-	It("enables search-slash prefix and decrypt-by-default", func() {
+	It("enables search-slash prefix and requires explicit value reveal", func() {
 		Expect(cfg.SearchSlashPrefix).To(BeTrue())
-		Expect(cfg.DecryptByDefault).To(BeTrue())
+		Expect(cfg.DecryptByDefault).To(BeFalse())
 	})
 
 	It("enables browse auto-refresh with a five-minute cooldown", func() {

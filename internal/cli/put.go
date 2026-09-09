@@ -69,9 +69,8 @@ func runPut(cmd *cobra.Command, args []string) error {
 	name := args[0]
 	valueOrFile := args[1]
 
-	// Validate name starts with /
-	if !strings.HasPrefix(name, "/") {
-		return fmt.Errorf("parameter name must start with /")
+	if err := validateParameterIdentifier(name, false); err != nil {
+		return err
 	}
 
 	// Load config
@@ -93,17 +92,9 @@ func runPut(cmd *cobra.Command, args []string) error {
 	}
 
 	// Create AWS client
-	awsOpts := aws.ClientOptions{
-		Region:           globalOpts.Region,
-		Profile:          globalOpts.Profile,
-		DescribePageSize: cfg.DescribePageSize,
-		DescribeMaxItems: cfg.DescribeMaxItems,
-	}
-	if awsOpts.Region == "" {
-		awsOpts.Region = cfg.Region
-	}
-	if awsOpts.Profile == "" {
-		awsOpts.Profile = cfg.Profile
+	awsOpts, err := resolveAWSOptions(cmd, cfg)
+	if err != nil {
+		return err
 	}
 
 	client, err := aws.NewClient(ctx, awsOpts)

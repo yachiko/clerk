@@ -26,8 +26,10 @@ type Client struct {
 
 // ClientOptions contains options for creating a new client
 type ClientOptions struct {
-	Region           string
-	Profile          string
+	Region  string
+	Profile string
+	// ProfileSet distinguishes an omitted profile from an explicit --profile default.
+	ProfileSet       bool
 	DescribePageSize int32
 	DescribeMaxItems int32
 }
@@ -39,18 +41,16 @@ func NewClient(ctx context.Context, opts ClientOptions) (*Client, error) {
 	if opts.Region != "" {
 		cfgOpts = append(cfgOpts, config.WithRegion(opts.Region))
 	}
-	// Skip WithSharedConfigProfile for the literal "default" profile: passing
-	// it explicitly forces the SDK to validate the profile exists in a config
-	// file, which fails on machines that rely purely on AWS_* env vars and
-	// have no ~/.aws/config. The SDK's intrinsic behavior already picks the
-	// "default" profile when none is specified.
-	if opts.Profile != "" && opts.Profile != "default" {
+	if opts.ProfileSet {
 		cfgOpts = append(cfgOpts, config.WithSharedConfigProfile(opts.Profile))
 	}
 
 	cfg, err := config.LoadDefaultConfig(ctx, cfgOpts...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load AWS config: %w", err)
+	}
+	if strings.TrimSpace(cfg.Region) == "" {
+		return nil, fmt.Errorf("AWS region is not configured; pass --region, set config region, or configure AWS_REGION/a shared AWS profile")
 	}
 
 	pageSize := opts.DescribePageSize

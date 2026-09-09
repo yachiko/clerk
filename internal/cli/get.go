@@ -77,9 +77,8 @@ func runGet(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	// Validate name starts with /
-	if !strings.HasPrefix(name, "/") {
-		return fmt.Errorf("parameter name must start with /")
+	if err := validateParameterIdentifier(name, true); err != nil {
+		return err
 	}
 
 	// Load config
@@ -90,24 +89,9 @@ func runGet(cmd *cobra.Command, args []string) error {
 	cfg := cfgMgr.Get()
 
 	// Create AWS client
-	region := globalOpts.Region
-	if region == "" && cfg.Region != "" {
-		region = cfg.Region
-	}
-	if region == "" {
-		region = "us-east-1"
-	}
-
-	profile := globalOpts.Profile
-	if profile == "" && cfg.Profile != "" {
-		profile = cfg.Profile
-	}
-
-	awsOpts := aws.ClientOptions{
-		Region:           region,
-		Profile:          profile,
-		DescribePageSize: cfg.DescribePageSize,
-		DescribeMaxItems: cfg.DescribeMaxItems,
+	awsOpts, err := resolveAWSOptions(cmd, cfg)
+	if err != nil {
+		return err
 	}
 
 	client, err := aws.NewClient(ctx, awsOpts)
@@ -156,6 +140,11 @@ func runGet(cmd *cobra.Command, args []string) error {
 // parseNameVersionLabel parses "name@version" or "name:label" format
 // Returns name, version, label, error
 func parseNameVersionLabel(input string) (string, int64, string, error) {
+	// SSM ARNs contain several colons. They are complete identifiers and do not
+	// use Clerk's name:label shorthand.
+	if strings.HasPrefix(input, "arn:") {
+		return input, 0, "", nil
+	}
 	// Check for :label syntax first
 	colonIndex := strings.LastIndex(input, ":")
 	if colonIndex != -1 {

@@ -27,13 +27,10 @@ var _ = Describe("Manager", func() {
 	Describe("on a fresh HOME with no config file", func() {
 		It("returns the baked-in defaults", func() {
 			cfg := mgr.Get()
-			Expect(cfg.Region).To(Equal("us-east-1"))
+			Expect(cfg.Region).To(BeEmpty())
 			Expect(cfg.Profile).To(BeEmpty())
 		})
 
-		It("computes the cache_path relative to HOME", func() {
-			Expect(mgr.Get().CachePath).To(Equal(filepath.Join(home, ".clerk", "cache.json")))
-		})
 	})
 
 	Describe("Save", func() {
@@ -71,7 +68,7 @@ var _ = Describe("Manager", func() {
 				Expect(err).NotTo(HaveOccurred())
 				Expect(v).To(Equal(expected))
 			},
-			Entry("region", "region", "us-east-1"),
+			Entry("region", "region", ""),
 			Entry("profile (empty)", "profile", ""),
 			Entry("default_type", "default_type", "SecureString"),
 			Entry("dotted key default.type", "default.type", "SecureString"),
@@ -81,7 +78,7 @@ var _ = Describe("Manager", func() {
 			Entry("cache_ttl (formatted duration)", "cache_ttl", "3h0m0s"),
 			Entry("clipboard_timeout", "clipboard_timeout", "1m0s"),
 			Entry("search_slash_prefix", "search_slash_prefix", "true"),
-			Entry("decrypt_by_default", "decrypt_by_default", "true"),
+			Entry("decrypt_by_default", "decrypt_by_default", "false"),
 			Entry("describe_page_size", "describe_page_size", "50"),
 		)
 
@@ -142,6 +139,29 @@ var _ = Describe("Manager", func() {
 		It("includes the headline settable keys", func() {
 			keys := mgr.ListKeys()
 			Expect(keys).To(ContainElements("region", "default_type", "describe_version_batch_size"))
+		})
+	})
+
+	Describe("configuration file decoding", func() {
+		It("accepts documented duration strings and emits them canonically", func() {
+			path := filepath.Join(home, ".clerk", "config.json")
+			Expect(os.MkdirAll(filepath.Dir(path), 0700)).To(Succeed())
+			Expect(os.WriteFile(path, []byte(`{"cache_ttl":"3h0m0s","clipboard_timeout":"1m0s","browse_refresh_cooldown":"5m0s"}`), 0600)).To(Succeed())
+			loaded, err := NewManager()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(loaded.Get().CacheTTL).To(Equal(3 * time.Hour))
+			Expect(loaded.Save()).To(Succeed())
+			data, err := os.ReadFile(path)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(string(data)).To(ContainSubstring(`"cache_ttl": "3h0m0s"`))
+		})
+
+		It("accepts legacy numeric duration files and rejects invalid runtime bounds", func() {
+			path := filepath.Join(home, ".clerk", "config.json")
+			Expect(os.MkdirAll(filepath.Dir(path), 0700)).To(Succeed())
+			Expect(os.WriteFile(path, []byte(`{"cache_ttl":3600000000000,"parallel_fetches":0}`), 0600)).To(Succeed())
+			_, err := NewManager()
+			Expect(err).To(MatchError(ContainSubstring("parallel_fetches must be between 1 and 50")))
 		})
 	})
 })
