@@ -74,7 +74,7 @@ func runBrowse(cmd *cobra.Command, args []string) error {
 	}
 
 	// Initialize cache with region and account ID
-	cacheMgr, err := cache.NewManager(cfg, client.GetRegion(), client.GetAccountID())
+	cacheMgr, err := cache.NewManagerForBackend(cfg, client.GetPartition(), client.GetRegion(), client.GetAccountID(), aws.BackendSSM)
 	if err != nil {
 		return fmt.Errorf("failed to initialize cache: %w", err)
 	}

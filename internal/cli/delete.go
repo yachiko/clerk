@@ -104,7 +104,7 @@ func runDelete(cmd *cobra.Command, args []string) error {
 	}
 
 	// Remove from cache with region and account ID
-	cacheMgr, err := cache.NewManager(cfg, client.GetRegion(), client.GetAccountID())
+	cacheMgr, err := cache.NewManagerForBackend(cfg, client.GetPartition(), client.GetRegion(), client.GetAccountID(), aws.BackendSSM)
 	if err == nil {
 		_ = cacheMgr.Delete(name)
 	}

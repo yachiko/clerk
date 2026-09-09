@@ -7,6 +7,7 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	"github.com/yachiko/clerk/internal/aws"
 	"github.com/yachiko/clerk/internal/config"
 	"github.com/yachiko/clerk/internal/testutil"
 )
@@ -40,8 +41,10 @@ var _ = Describe("cache.Manager", func() {
 	})
 
 	Describe("NewManager", func() {
-		It("places the cache file under ~/.clerk/cache/<account>/<region>.json", func() {
-			Expect(mgr.cachePath).To(Equal(filepath.Join(home, ".clerk", "cache", "123456789012", "us-east-1.json")))
+		It("places the SSM cache file under its qualified v2 scope", func() {
+			Expect(mgr.cachePath).To(Equal(filepath.Join(home, ".clerk", "cache", "v2", "aws", "123456789012", "us-east-1", "ssm.json")))
+			Expect(mgr.data.SchemaVersion).To(Equal(SchemaVersion))
+			Expect(mgr.data.Backend).To(Equal(aws.BackendSSM))
 		})
 	})
 
@@ -52,6 +55,8 @@ var _ = Describe("cache.Manager", func() {
 
 		It("reports fresh inside the TTL window", func() {
 			mgr.data.LastRefresh = time.Now()
+			mgr.data.Complete = true
+			mgr.data.Incomplete = false
 			Expect(mgr.IsExpired()).To(BeFalse())
 		})
 
@@ -84,6 +89,8 @@ var _ = Describe("cache.Manager", func() {
 		It("reflects entry count, region and freshness once populated", func() {
 			mgr.data.Entries = []CacheEntry{{Name: "/a"}, {Name: "/b"}}
 			mgr.data.LastRefresh = time.Now()
+			mgr.data.Complete = true
+			mgr.data.Incomplete = false
 			mgr.data.Region = "us-east-1"
 
 			stats := mgr.GetStats()

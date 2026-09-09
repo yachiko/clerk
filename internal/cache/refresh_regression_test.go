@@ -31,9 +31,10 @@ func (f refreshFake) GetParameterTags(context.Context, string) (map[string]strin
 func newTestManager(t *testing.T) *Manager {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "cache.json")
+	scope := aws.ResourceIdentity{Partition: "aws", AccountID: "123456789012", Region: "us-east-1", Backend: aws.BackendSSM}
 	return &Manager{
 		cachePath: path, lockFile: path + ".lock", ttl: time.Hour,
-		data: &CacheData{Entries: []CacheEntry{}}, changes: map[string]*CacheEntry{},
+		scope: scope, data: newCacheData(scope), changes: map[aws.ResourceIdentity]*CacheEntry{},
 	}
 }
 

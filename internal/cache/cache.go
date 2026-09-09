@@ -19,29 +19,52 @@ import (
 const tagTTL = 15 * time.Minute
 
 type Manager struct {
-	cachePath         string
-	ttl               time.Duration
-	data              *CacheData
-	mu                sync.RWMutex
-	refreshMu         sync.Mutex
-	lockFile          string
-	region, accountID string
-	changes           map[string]*CacheEntry
+	cachePath string
+	ttl       time.Duration
+	data      *CacheData
+	mu        sync.RWMutex
+	refreshMu sync.Mutex
+	lockFile  string
+	scope     aws.ResourceIdentity
+	changes   map[aws.ResourceIdentity]*CacheEntry
 }
 
+// NewManager preserves the original SSM-only API. New backend-aware callers
+// should use NewManagerForBackend so the resolved AWS partition is retained.
 func NewManager(cfg *config.Config, region, accountID string) (*Manager, error) {
+	return NewManagerForBackend(cfg, "aws", region, accountID, aws.BackendSSM)
+}
+
+// NewManagerForBackend opens one backend-qualified cache snapshot.
+func NewManagerForBackend(cfg *config.Config, partition, region, accountID string, backend aws.Backend) (*Manager, error) {
+	if backend != aws.BackendSSM && backend != aws.BackendSecretsManager {
+		return nil, fmt.Errorf("cache backend must identify one service, got %q", backend)
+	}
+	if partition == "" || region == "" || accountID == "" {
+		return nil, fmt.Errorf("cache partition, account ID, and region are required")
+	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return nil, fmt.Errorf("failed to get home directory: %w", err)
 	}
-	p := filepath.Join(home, ".clerk", "cache", accountID, region+".json")
-	m := &Manager{cachePath: p, ttl: cfg.CacheTTL, lockFile: p + ".lock", region: region, accountID: accountID, data: &CacheData{Entries: []CacheEntry{}}, changes: map[string]*CacheEntry{}}
+	scope := aws.ResourceIdentity{Partition: partition, AccountID: accountID, Region: region, Backend: backend}
+	p := filepath.Join(home, ".clerk", "cache", "v2", partition, accountID, region, string(backend)+".json")
+	m := &Manager{cachePath: p, ttl: cfg.CacheTTL, lockFile: p + ".lock", scope: scope, data: newCacheData(scope), changes: map[aws.ResourceIdentity]*CacheEntry{}}
 	if err := m.load(); err != nil && !os.IsNotExist(err) {
 		// A malformed cache must not prevent an AWS-backed command, but retain a
 		// diagnostic in memory so callers do not mistake it for a clean miss.
 		m.data.LastRefreshError = "cache ignored: " + err.Error()
+	} else if os.IsNotExist(err) && backend == aws.BackendSSM {
+		legacyPath := filepath.Join(home, ".clerk", "cache", accountID, region+".json")
+		if migrationErr := m.migrateLegacySSM(legacyPath); migrationErr != nil && !os.IsNotExist(migrationErr) {
+			m.data.LastRefreshError = "legacy SSM cache ignored: " + migrationErr.Error()
+		}
 	}
 	return m, nil
+}
+
+func newCacheData(scope aws.ResourceIdentity) *CacheData {
+	return &CacheData{SchemaVersion: SchemaVersion, Partition: scope.Partition, AccountID: scope.AccountID, Region: scope.Region, Backend: scope.Backend, Entries: []CacheEntry{}, Incomplete: true}
 }
 
 func cloneEntry(e CacheEntry) CacheEntry {
@@ -78,10 +101,59 @@ func (m *Manager) load() error {
 	if err := json.Unmarshal(b, &d); err != nil {
 		return fmt.Errorf("invalid cache file: %w", err)
 	}
+	if err := m.validateData(&d); err != nil {
+		return err
+	}
+	for i := range d.Entries {
+		entry, err := m.qualifyEntry(d.Entries[i])
+		if err != nil {
+			return fmt.Errorf("invalid cache entry: %w", err)
+		}
+		d.Entries[i] = entry
+	}
 	m.mu.Lock()
 	m.data = cloneData(&d)
 	m.mu.Unlock()
 	return nil
+}
+
+func (m *Manager) validateData(d *CacheData) error {
+	if d.SchemaVersion != SchemaVersion {
+		return fmt.Errorf("unsupported cache schema version %d", d.SchemaVersion)
+	}
+	if d.Partition != m.scope.Partition || d.AccountID != m.scope.AccountID || d.Region != m.scope.Region || d.Backend != m.scope.Backend {
+		return fmt.Errorf("cache scope does not match requested backend scope")
+	}
+	return nil
+}
+
+func (m *Manager) migrateLegacySSM(path string) error {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	var legacy CacheData
+	if err := json.Unmarshal(b, &legacy); err != nil {
+		return fmt.Errorf("invalid legacy cache file: %w", err)
+	}
+	migrated := newCacheData(m.scope)
+	migrated.LastRefresh = legacy.LastRefresh
+	migrated.Incomplete = legacy.Incomplete
+	migrated.Complete = !legacy.LastRefresh.IsZero() && !legacy.Incomplete && legacy.LastRefreshError == ""
+	migrated.LastRefreshError = legacy.LastRefreshError
+	for _, entry := range legacy.Entries {
+		// Legacy files predate multiple backends and are SSM-only by definition.
+		entry.Identity = aws.ResourceIdentity{}
+		qualified, qualifyErr := m.qualifyEntry(entry)
+		if qualifyErr != nil {
+			return qualifyErr
+		}
+		migrated.Entries = append(migrated.Entries, qualified)
+	}
+	return m.withDiskLock(func(d *CacheData) error {
+		*d = *migrated
+		return nil
+	})
 }
 
 // withDiskLock serializes a whole read/merge/write transaction. os.Rename
@@ -94,10 +166,10 @@ func (m *Manager) withDiskLock(fn func(*CacheData) error) error {
 		return fmt.Errorf("failed to acquire cache lock: %w", err)
 	}
 	defer m.releaseLock()
-	d := &CacheData{Entries: []CacheEntry{}}
+	d := newCacheData(m.scope)
 	if b, err := os.ReadFile(m.cachePath); err == nil {
-		if json.Unmarshal(b, d) != nil {
-			d = &CacheData{Entries: []CacheEntry{}}
+		if json.Unmarshal(b, d) != nil || m.validateData(d) != nil {
+			d = newCacheData(m.scope)
 		}
 	} else if !os.IsNotExist(err) {
 		return err
@@ -156,7 +228,7 @@ func (m *Manager) releaseLock() { _ = os.Remove(m.lockFile) }
 func (m *Manager) IsExpired() bool {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	return m.data.LastRefresh.IsZero() || m.data.Incomplete || time.Since(m.data.LastRefresh) > m.ttl
+	return m.data.LastRefresh.IsZero() || !m.data.Complete || m.data.Incomplete || time.Since(m.data.LastRefresh) > m.ttl
 }
 func (m *Manager) GetAge() time.Duration {
 	m.mu.RLock()
@@ -170,7 +242,7 @@ func (m *Manager) GetStats() CacheStats {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	d := m.data
-	return CacheStats{TotalEntries: len(d.Entries), LastRefresh: d.LastRefresh, IsExpired: d.LastRefresh.IsZero() || d.Incomplete || time.Since(d.LastRefresh) > m.ttl, Region: d.Region, Complete: !d.Incomplete}
+	return CacheStats{TotalEntries: len(d.Entries), LastRefresh: d.LastRefresh, IsExpired: d.LastRefresh.IsZero() || !d.Complete || d.Incomplete || time.Since(d.LastRefresh) > m.ttl, Partition: d.Partition, AccountID: d.AccountID, Region: d.Region, Backend: d.Backend, Complete: d.Complete && !d.Incomplete, LastRefreshError: d.LastRefreshError}
 }
 func (m *Manager) GetAll() []CacheEntry {
 	m.mu.RLock()
@@ -205,45 +277,111 @@ func (m *Manager) SearchByTag(key, value string) []CacheEntry {
 	return out
 }
 func (m *Manager) Get(name string) (*CacheEntry, bool) {
+	return m.GetByIdentity(m.identity(name))
+}
+
+// GetByIdentity retrieves one resource without conflating equal display names
+// in different AWS scopes or backends.
+func (m *Manager) GetByIdentity(identity aws.ResourceIdentity) (*CacheEntry, bool) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	for _, e := range m.data.Entries {
-		if e.Name == name {
+		if m.entryIdentity(e) == identity {
 			x := cloneEntry(e)
 			return &x, true
 		}
 	}
 	return nil, false
 }
-func upsert(es []CacheEntry, e CacheEntry) []CacheEntry {
+func entryIdentity(e CacheEntry, scope aws.ResourceIdentity) aws.ResourceIdentity {
+	id := e.Identity
+	if id.Partition == "" {
+		id.Partition = scope.Partition
+	}
+	if id.AccountID == "" {
+		id.AccountID = scope.AccountID
+	}
+	if id.Region == "" {
+		id.Region = scope.Region
+	}
+	if id.Backend == "" {
+		id.Backend = scope.Backend
+	}
+	if id.CanonicalID == "" {
+		id.CanonicalID = e.Name
+	}
+	return id
+}
+func upsert(es []CacheEntry, e CacheEntry, scope aws.ResourceIdentity) []CacheEntry {
 	for i := range es {
-		if es[i].Name == e.Name {
+		if entryIdentity(es[i], scope) == e.Identity {
 			es[i] = cloneEntry(e)
 			return es
 		}
 	}
 	return append(es, cloneEntry(e))
 }
-func remove(es []CacheEntry, name string) []CacheEntry {
+func remove(es []CacheEntry, identity aws.ResourceIdentity, scope aws.ResourceIdentity) []CacheEntry {
 	for i := range es {
-		if es[i].Name == name {
+		if entryIdentity(es[i], scope) == identity {
 			return append(es[:i], es[i+1:]...)
 		}
 	}
 	return es
 }
 func (m *Manager) Update(e CacheEntry) error {
-	e = cloneEntry(e)
+	var err error
+	e, err = m.qualifyEntry(e)
+	if err != nil {
+		return err
+	}
 	m.mu.Lock()
-	m.changes[e.Name] = &e
+	m.changes[e.Identity] = &e
 	m.mu.Unlock()
-	return m.withDiskLock(func(d *CacheData) error { d.Entries = upsert(d.Entries, e); return nil })
+	return m.withDiskLock(func(d *CacheData) error { d.Entries = upsert(d.Entries, e, m.scope); return nil })
 }
 func (m *Manager) Delete(name string) error {
+	return m.DeleteByIdentity(m.identity(name))
+}
+
+// DeleteByIdentity removes only the qualified resource.
+func (m *Manager) DeleteByIdentity(identity aws.ResourceIdentity) error {
+	if err := m.validateIdentity(identity); err != nil {
+		return err
+	}
 	m.mu.Lock()
-	m.changes[name] = nil
+	m.changes[identity] = nil
 	m.mu.Unlock()
-	return m.withDiskLock(func(d *CacheData) error { d.Entries = remove(d.Entries, name); return nil })
+	return m.withDiskLock(func(d *CacheData) error { d.Entries = remove(d.Entries, identity, m.scope); return nil })
+}
+
+func (m *Manager) identity(canonicalID string) aws.ResourceIdentity {
+	id := m.scope
+	id.CanonicalID = canonicalID
+	return id
+}
+
+func (m *Manager) entryIdentity(entry CacheEntry) aws.ResourceIdentity {
+	return entryIdentity(entry, m.scope)
+}
+
+func (m *Manager) qualifyEntry(entry CacheEntry) (CacheEntry, error) {
+	entry = cloneEntry(entry)
+	entry.Identity = entryIdentity(entry, m.scope)
+	if err := m.validateIdentity(entry.Identity); err != nil {
+		return CacheEntry{}, err
+	}
+	return entry, nil
+}
+
+func (m *Manager) validateIdentity(identity aws.ResourceIdentity) error {
+	if identity.CanonicalID == "" {
+		return fmt.Errorf("cache resource canonical ID is required")
+	}
+	if identity.Partition != m.scope.Partition || identity.AccountID != m.scope.AccountID || identity.Region != m.scope.Region || identity.Backend != m.scope.Backend {
+		return fmt.Errorf("resource identity does not match cache scope")
+	}
+	return nil
 }
 
 type RefreshProgressCallback func(current, total int)
@@ -263,11 +401,11 @@ func (m *Manager) Refresh(ctx context.Context, client RefreshClient, region stri
 	old := cloneData(m.data)
 	// Changes made before a refresh are already represented in old. Only
 	// changes after this point need rebasing over the incoming snapshot.
-	m.changes = map[string]*CacheEntry{}
+	m.changes = map[aws.ResourceIdentity]*CacheEntry{}
 	m.mu.Unlock()
-	prior := map[string]CacheEntry{}
+	prior := map[aws.ResourceIdentity]CacheEntry{}
 	for _, e := range old.Entries {
-		prior[e.Name] = e
+		prior[m.entryIdentity(e)] = e
 	}
 	ch := make(chan aws.ParameterMetadata, 100)
 	type streamResult struct {
@@ -291,8 +429,8 @@ func (m *Manager) Refresh(ctx context.Context, client RefreshClient, region stri
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
-			e := CacheEntry{Name: p.Name, Type: p.Type, Version: p.Version, LastModifiedDate: p.LastModifiedDate}
-			if old, ok := prior[p.Name]; ok {
+			e := CacheEntry{Identity: m.identity(p.Name), Name: p.Name, Type: p.Type, Version: p.Version, LastModifiedDate: p.LastModifiedDate}
+			if old, ok := prior[e.Identity]; ok {
 				e.Tags = old.Tags
 				e.TagsFetchedAt = old.TagsFetchedAt
 				e.TagsComplete = old.TagsComplete
@@ -322,19 +460,23 @@ func (m *Manager) Refresh(ctx context.Context, client RefreshClient, region stri
 	}
 	wg.Wait()
 	stream := <-streamDone
-	if stream.err != nil {
-		return stream.err
-	}
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}
-	return m.withDiskLock(func(d *CacheData) error {
-		next := &CacheData{LastRefresh: time.Now(), Region: region, Incomplete: !stream.result.Complete, Entries: es}
-		if !stream.result.Complete {
+	persistErr := m.withDiskLock(func(d *CacheData) error {
+		next := newCacheData(m.scope)
+		next.LastRefresh = time.Now()
+		next.Incomplete = !stream.result.Complete || stream.err != nil
+		next.Complete = !next.Incomplete
+		next.Entries = es
+		if stream.err != nil {
+			next.LastRefreshError = stream.err.Error()
+		}
+		if next.Incomplete {
 			for _, e := range d.Entries {
 				found := false
 				for _, seen := range es {
-					if e.Name == seen.Name {
+					if m.entryIdentity(e) == m.entryIdentity(seen) {
 						found = true
 						break
 					}
@@ -347,40 +489,44 @@ func (m *Manager) Refresh(ctx context.Context, client RefreshClient, region stri
 		// Another process can have changed the disk snapshot while this refresh
 		// was in flight. Rebase those changes when they differ from our starting
 		// snapshot, rather than overwriting a successful local mutation.
-		start := map[string]CacheEntry{}
+		start := map[aws.ResourceIdentity]CacheEntry{}
 		for _, e := range old.Entries {
-			start[e.Name] = e
+			start[m.entryIdentity(e)] = e
 		}
-		current := map[string]CacheEntry{}
+		current := map[aws.ResourceIdentity]CacheEntry{}
 		for _, e := range d.Entries {
-			current[e.Name] = e
+			current[m.entryIdentity(e)] = e
 		}
-		for name, before := range start {
-			if _, stillPresent := current[name]; !stillPresent {
-				next.Entries = remove(next.Entries, name)
-			} else if !reflect.DeepEqual(before, current[name]) {
-				next.Entries = upsert(next.Entries, current[name])
+		for identity, before := range start {
+			if _, stillPresent := current[identity]; !stillPresent {
+				next.Entries = remove(next.Entries, identity, m.scope)
+			} else if !reflect.DeepEqual(before, current[identity]) {
+				next.Entries = upsert(next.Entries, current[identity], m.scope)
 			}
 		}
-		for name, now := range current {
-			if _, existed := start[name]; !existed {
-				next.Entries = upsert(next.Entries, now)
+		for identity, now := range current {
+			if _, existed := start[identity]; !existed {
+				next.Entries = upsert(next.Entries, now, m.scope)
 			}
 		}
 		m.mu.Lock()
 		changes := m.changes
-		m.changes = map[string]*CacheEntry{}
+		m.changes = map[aws.ResourceIdentity]*CacheEntry{}
 		m.mu.Unlock()
-		for name, e := range changes {
+		for identity, e := range changes {
 			if e == nil {
-				next.Entries = remove(next.Entries, name)
+				next.Entries = remove(next.Entries, identity, m.scope)
 			} else {
-				next.Entries = upsert(next.Entries, *e)
+				next.Entries = upsert(next.Entries, *e, m.scope)
 			}
 		}
 		*d = *next
 		return nil
 	})
+	if persistErr != nil {
+		return persistErr
+	}
+	return stream.err
 }
 
 func (m *Manager) Sort(es []CacheEntry, by string) []CacheEntry {

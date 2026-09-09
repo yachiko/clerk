@@ -1,6 +1,12 @@
 package cache
 
-import "time"
+import (
+	"time"
+
+	"github.com/yachiko/clerk/internal/aws"
+)
+
+const SchemaVersion = 2
 
 // VersionHistoryEntry represents a single version in history
 type VersionHistoryEntry struct {
@@ -8,8 +14,10 @@ type VersionHistoryEntry struct {
 	Modified time.Time `json:"modified"`
 }
 
-// CacheEntry represents a cached parameter
+// CacheEntry represents cached resource metadata. Values must never be added to
+// this type because cache files are durable plaintext metadata.
 type CacheEntry struct {
+	Identity         aws.ResourceIdentity  `json:"identity"`
 	Name             string                `json:"name"`
 	Type             string                `json:"type"`
 	Version          int64                 `json:"version"`
@@ -23,9 +31,14 @@ type CacheEntry struct {
 
 // CacheData represents the entire cache file structure
 type CacheData struct {
-	LastRefresh time.Time    `json:"last_refresh"`
-	Region      string       `json:"region"`
-	Entries     []CacheEntry `json:"entries"`
+	SchemaVersion int          `json:"schema_version"`
+	Partition     string       `json:"partition"`
+	AccountID     string       `json:"account_id"`
+	Region        string       `json:"region"`
+	Backend       aws.Backend  `json:"backend"`
+	LastRefresh   time.Time    `json:"last_refresh"`
+	Entries       []CacheEntry `json:"entries"`
+	Complete      bool         `json:"complete"`
 	// Incomplete is true when a discovery cap stopped a refresh. Such a cache
 	// may be useful for known entries but must never imply absent parameters.
 	Incomplete       bool   `json:"incomplete,omitempty"`
@@ -34,9 +47,13 @@ type CacheData struct {
 
 // CacheStats provides cache statistics
 type CacheStats struct {
-	TotalEntries int
-	LastRefresh  time.Time
-	IsExpired    bool
-	Region       string
-	Complete     bool
+	TotalEntries     int
+	LastRefresh      time.Time
+	IsExpired        bool
+	Partition        string
+	AccountID        string
+	Region           string
+	Backend          aws.Backend
+	Complete         bool
+	LastRefreshError string
 }

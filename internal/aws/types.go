@@ -36,6 +36,66 @@ type ResourceValue struct {
 	Binary   []byte           `json:"binary,omitempty"`
 }
 
+// SecretMetadata is the metadata returned by a Secrets Manager inventory scan.
+// It intentionally contains only fields available without retrieving a value.
+type SecretMetadata struct {
+	Identity                ResourceIdentity     `json:"identity"`
+	Name                    string               `json:"name"`
+	ARN                     string               `json:"arn"`
+	Description             string               `json:"description,omitempty"`
+	KMSKeyID                string               `json:"kms_key_id,omitempty"`
+	Tags                    map[string]string    `json:"tags,omitempty"`
+	CreatedDate             *time.Time           `json:"created_date,omitempty"`
+	LastAccessedDate        *time.Time           `json:"last_accessed_date,omitempty"`
+	LastChangedDate         *time.Time           `json:"last_changed_date,omitempty"`
+	DeletedDate             *time.Time           `json:"deleted_date,omitempty"`
+	RotationEnabled         *bool                `json:"rotation_enabled,omitempty"`
+	RotationLambdaARN       string               `json:"rotation_lambda_arn,omitempty"`
+	RotationRules           *SecretRotationRules `json:"rotation_rules,omitempty"`
+	LastRotatedDate         *time.Time           `json:"last_rotated_date,omitempty"`
+	NextRotationDate        *time.Time           `json:"next_rotation_date,omitempty"`
+	VersionsToStages        map[string][]string  `json:"versions_to_stages,omitempty"`
+	PrimaryRegion           string               `json:"primary_region,omitempty"`
+	Replica                 bool                 `json:"replica,omitempty"`
+	OwningService           string               `json:"owning_service,omitempty"`
+	ExternalSecretType      string               `json:"external_secret_type,omitempty"`
+	ExternalRotationRoleARN string               `json:"external_rotation_role_arn,omitempty"`
+}
+
+// SecretRotationRules describes the configured Secrets Manager rotation schedule.
+type SecretRotationRules struct {
+	AutomaticallyAfterDays *int64 `json:"automatically_after_days,omitempty"`
+	Duration               string `json:"duration,omitempty"`
+	ScheduleExpression     string `json:"schedule_expression,omitempty"`
+}
+
+// SecretDetail is a retrieved Secrets Manager value and its version details.
+type SecretDetail struct {
+	Identity      ResourceIdentity `json:"identity"`
+	Name          string           `json:"name"`
+	ARN           string           `json:"arn"`
+	Value         ResourceValue    `json:"value"`
+	VersionID     string           `json:"version_id"`
+	VersionStages []string         `json:"version_stages,omitempty"`
+	CreatedDate   *time.Time       `json:"created_date,omitempty"`
+}
+
+// SecretVersion is metadata for one opaque Secrets Manager version ID.
+type SecretVersion struct {
+	VersionID        string     `json:"version_id"`
+	VersionStages    []string   `json:"version_stages,omitempty"`
+	KMSKeyIDs        []string   `json:"kms_key_ids,omitempty"`
+	CreatedDate      *time.Time `json:"created_date,omitempty"`
+	LastAccessedDate *time.Time `json:"last_accessed_date,omitempty"`
+}
+
+// SecretValueSelector chooses a version by stage or opaque ID. With neither
+// field set, GetSecretValue selects AWSCURRENT.
+type SecretValueSelector struct {
+	VersionStage string
+	VersionID    string
+}
+
 // NewTextValue constructs a text resource value.
 func NewTextValue(identity ResourceIdentity, value string) ResourceValue {
 	return ResourceValue{Identity: identity, Kind: ValueText, Text: value}
