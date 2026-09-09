@@ -69,7 +69,7 @@ clerk config set profile myprofile
 clerk config set region us-east-1
 
 # Create a secret
-clerk put "/dev/db_password" "mysecretpassword" --tags "env=dev,team=backend"
+clerk put "/dev/db_password" --stdin --tags "env=dev,team=backend" < ./db-password.txt
 
 # Get a secret
 clerk get "/dev/db_password"
@@ -87,7 +87,7 @@ clerk browse
 
 | Command  | Description                 | Usage                                      |
 | -------- | --------------------------- | ------------------------------------------ |
-| `put`    | Create or update a secret   | `clerk put <name> <value\|file> [flags]` |
+| `put`    | Create or update a secret   | `clerk put <name> [value] [--file path\|--stdin]` |
 | `get`    | Retrieve a secret value     | `clerk get <name[@version]> [flags]`     |
 | `delete` | Delete a secret             | `clerk delete <name> [flags]`             |
 | `list`   | List secrets with filtering | `clerk list [path] [flags]`               |
@@ -112,17 +112,36 @@ Configuration is stored in `~/.clerk/config.json`.
 
 | Option              | Default               | Description                                          |
 | ------------------- | --------------------- | ---------------------------------------------------- |
-| `region`            | `us-east-1`           | AWS region                                           |
+| `region`            | `""` (SDK resolution) | Explicit AWS region override                                           |
 | `profile`           | `""` (SDK default)    | AWS profile; empty uses standard SDK credential chain |
 | `cache_ttl`         | `3h`                  | Cache time-to-live                                   |
 | `clipboard_timeout` | `60s`                 | Clear clipboard after duration                       |
 | `default_type`      | `SecureString`        | Default parameter type                               |
 | `default_sort`      | `name`                | Default sort order                                   |
-| `parallel_fetches`  | `10`                  | Concurrent API calls for refresh                     |
+| `parallel_fetches`  | `10`                  | Concurrent API calls for refresh (1–50)               |
+| `describe_page_size` | `50`                | Metadata page size (1–50)                             |
+| `describe_max_items` | `0`                 | Refresh inventory cap; 0 means unlimited              |
+| `describe_version_batch_size` | `10`       | History value batch size                             |
+| `decrypt_by_default` | `false`             | Retrieve plaintext automatically in detail view       |
+| `browse_auto_refresh` | `true`             | Refresh stale metadata when browse starts             |
+| `browse_refresh_cooldown` | `5m`           | Minimum age for startup refresh                       |
+| `search_slash_prefix` | `true`             | Start interactive search with `/`                     |
 
 Cache files live under `~/.clerk/cache/<account-id>/<region>.json` — separate
 files per AWS account and region, so switching profiles doesn't invalidate
 unrelated caches. The location isn't user-configurable.
+
+Region and profile precedence is command flag, explicitly configured Clerk value,
+then the AWS SDK environment/shared configuration. An unset region produces an
+actionable error if the SDK cannot resolve one. Explicit `--profile default`
+selects that profile even when `AWS_PROFILE` names a different profile. Leaving
+the profile unset keeps the standard credential chain, including environment
+credentials and roles. Confirm the resolved account and region before mutations.
+
+Duration fields accept strings such as `3h` and legacy numeric nanoseconds;
+configuration saves use strings. Negative durations and invalid concurrency or
+pagination values are rejected. `cache_path` is deprecated and does not change
+the account/region cache location.
 
 ### Example Config
 
@@ -141,6 +160,16 @@ unrelated caches. The location isn't user-configurable.
 ## Browse Mode
 
 The browse mode provides an interactive terminal UI similar to k9s for Kubernetes.
+
+Detail browsing starts masked by default. Reveal or copy explicitly retrieves a
+value; older versions are loaded on demand. Closing detail drops retained value
+references without promising physical memory erasure. Editors return through the
+terminal UI lifecycle, preserve bytes, skip unchanged saves, and reject detected
+concurrent updates.
+
+Startup requires online AWS identity resolution. Cached fallback after a refresh
+failure is visibly stale; offline startup without verified account identity is
+unsupported. Automatic refresh is a startup freshness check, not a periodic monitor.
 
 ### Keyboard Shortcuts
 
@@ -169,7 +198,7 @@ The browse mode provides an interactive terminal UI similar to k9s for Kubernete
 clerk put "/app/api_key" "sk_live_abc123"
 
 # Create from file content
-clerk put "/app/certificate" ./certs/cert.pem
+clerk put "/app/certificate" --file ./certs/cert.pem
 
 # Create with tags
 clerk put "/prod/db/password" "pass123" --tags "env=prod,team=backend,criticality=high"
@@ -180,6 +209,12 @@ clerk put "/app/allowed_hosts" "host1.com,host2.com,host3.com" --type StringList
 # Create with specific KMS key
 clerk put "/secure/secret" "value" --kms-key-id alias/my-key
 ```
+
+Positional values are always literal, including text equal to an existing filename.
+Use `--file` to read a file or `--stdin` to read standard input; these modes preserve
+leading/trailing whitespace and newlines exactly. Missing files fail. This replaces
+the old implicit filename detection and trimming behavior. For sensitive values,
+prefer file/stdin input to keep them out of shell history and process arguments.
 
 ### Retrieve Secrets
 
@@ -200,6 +235,12 @@ clerk get "/app/api_key" --value
 clerk get "/app/api_key" --output json
 ```
 
+`get --value` emits raw bytes without adding a newline, allowing file/stdin
+round trips. Raw output can contain terminal controls; redirect it to a file or
+pipe when displaying untrusted values. Human detail output escapes unsafe controls;
+JSON uses JSON escaping. Masked values use a fixed mask without revealing length
+or fragments.
+
 ### List and Filter
 
 ```bash
@@ -219,6 +260,17 @@ clerk list "/dev/*" --sort modified
 clerk list --tags
 ```
 
+Listing and cache matching are case-sensitive. `*` crosses `/`, so
+`/*/database/*` matches nested paths; a name without `*` is exact. Use `/dev/*`
+for a hierarchy and `/` for all names, including flat parameter names. Character
+classes and backslash escapes are unsupported and produce an error. Interactive
+search also supports substring matching.
+
+Inventory uses metadata APIs without retrieving values or history. `--tags`
+requests tag enrichment and shows unavailable tags separately from an empty set.
+A capped refresh is incomplete and preserves previously known unseen entries;
+it cannot establish that those parameters have been deleted.
+
 ### Copy and Move
 
 ```bash
@@ -228,6 +280,19 @@ clerk cp "/dev/api_key" "/staging/api_key"
 # Move (rename) secret
 clerk mv "/old/path/secret" "/new/path/secret"
 ```
+
+Transfers create destinations by default. Use `--overwrite` to deliberately replace
+an existing target. Moves require confirmation; scripts must pass `--force`,
+independently of output format. Copy/move decrypt and verify the destination and
+preserve supported type, KMS key, tier, description, allowed pattern, policies, and
+tags. Tag updates merge supplied keys; omitted keys remain unchanged.
+
+A transfer copies the current value and supported metadata; it does not copy
+labels or version history. A move deletes source history when the source is deleted.
+If a step fails after a destination write, Clerk retains the destination and reports
+the partial result. Inspect both resources before retrying. A source-delete timeout
+may have completed remotely. The source version check reduces concurrent-update
+risk but SSM read/check/delete and editor read/check/write are not atomic.
 
 ## Shell Completion
 
@@ -250,8 +315,8 @@ source <(clerk completion bash)
 ## Security
 
 - **Secret values are never cached** - Only metadata is cached locally
-- **Clipboard auto-clear** - Clipboard is automatically cleared after 60 seconds (configurable)
-- **Secure temp files** - Temp files for editing are securely deleted
+- **Clipboard cleanup** - Expiry and normal UI shutdown clear the last Clerk-owned value only when clipboard contents still match; ownership checks are best effort and do not clear external clipboard history.
+- **Editor files** - Editing uses private temporary storage with restrictive permissions and best-effort cleanup. Abrupt termination, editor-managed backups elsewhere, and physical erasure on SSD/COW filesystems are outside that guarantee.
 - **Standard AWS auth** - Uses AWS SDK v2 with standard credential chain
 - **Encryption support** - Full support for SecureString parameters with KMS
 
@@ -260,7 +325,64 @@ source <(clerk completion bash)
 - AWS credentials configured (environment, config file, or IAM role)
 - Appropriate IAM permissions for SSM Parameter Store
 
-### Required IAM Permissions
+### IAM policy examples
+
+Replace the example region `eu-west-1`, account `123456789012`, parameter prefix
+`app/`, and KMS key ID with your own scope. These policies are additive: choose
+inventory, add the reader policy for values, and add the writer policy for mutations.
+Clerk resolves the account with `sts:GetCallerIdentity`; that operation does not
+require an identity-policy grant. The examples have not been exercised in a live
+account; validate them with your key policy and an intentionally denied resource
+before deployment.
+
+Inventory (`DescribeParameters` requires account-wide resource scope):
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": "ssm:DescribeParameters",
+      "Resource": "*"
+    },
+    {
+      "Effect": "Allow",
+      "Action": "ssm:ListTagsForResource",
+      "Resource": "arn:aws:ssm:eu-west-1:123456789012:parameter/app/*"
+    }
+  ]
+}
+```
+
+Tag lookup is needed for enriched inventory and transfers. Plain metadata listing
+does not require it. `DescribeParameters` exposes metadata across the selected
+account and region; a parameter prefix in Clerk is a filter, not an IAM boundary.
+
+Value reader (including explicit history access):
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": ["ssm:GetParameter", "ssm:GetParameters", "ssm:GetParameterHistory"],
+      "Resource": "arn:aws:ssm:eu-west-1:123456789012:parameter/app/*"
+    },
+    {
+      "Effect": "Allow",
+      "Action": "kms:Decrypt",
+      "Resource": "arn:aws:kms:eu-west-1:123456789012:key/11111111-2222-3333-4444-555555555555",
+      "Condition": {
+        "StringEquals": {"kms:ViaService": "ssm.eu-west-1.amazonaws.com"}
+      }
+    }
+  ]
+}
+```
+
+Writer (also requires reader permissions for transfer verification and edits):
 
 ```json
 {
@@ -269,35 +391,30 @@ source <(clerk completion bash)
     {
       "Effect": "Allow",
       "Action": [
-        "ssm:GetParameter",
-        "ssm:GetParameters",
-        "ssm:GetParametersByPath",
-        "ssm:GetParameterHistory",
-        "ssm:PutParameter",
-        "ssm:DeleteParameter",
-        "ssm:DescribeParameters",
-        "ssm:ListTagsForResource"
+        "ssm:PutParameter", "ssm:DeleteParameter",
+        "ssm:AddTagsToResource", "ssm:RemoveTagsFromResource",
+        "ssm:LabelParameterVersion", "ssm:UnlabelParameterVersion"
       ],
-      "Resource": "*"
+      "Resource": "arn:aws:ssm:eu-west-1:123456789012:parameter/app/*"
     },
     {
       "Effect": "Allow",
-      "Action": [
-        "kms:Decrypt",
-        "kms:DescribeKey"
-      ],
-      "Resource": "*",
+      "Action": ["kms:Encrypt", "kms:GenerateDataKey"],
+      "Resource": "arn:aws:kms:eu-west-1:123456789012:key/11111111-2222-3333-4444-555555555555",
       "Condition": {
-        "StringEquals": {
-          "kms:ViaService": [
-            "ssm.*.amazonaws.com"
-          ]
-        }
+        "StringEquals": {"kms:ViaService": "ssm.eu-west-1.amazonaws.com"}
       }
     }
   ]
 }
 ```
+
+Standard secure writes use `kms:Encrypt`; advanced secure writes use
+`kms:GenerateDataKey`. Access also depends on the KMS key policy. See
+[AWS Parameter Store KMS permissions](https://docs.aws.amazon.com/systems-manager/latest/userguide/secure-string-parameter-kms-encryption.html).
+The exact `kms:ViaService` endpoint deliberately uses `StringEquals`; wildcard
+patterns require `StringLike`, as documented in
+[IAM condition operators](https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_policies_elements_condition_operators.html).
 
 ## Building
 
