@@ -88,13 +88,29 @@ func (f *Formatter) PrintInfo(format string, args ...any) {
 
 // MaskValue masks a secret value
 func MaskValue(value string) string {
-	if len(value) <= 8 {
-		return strings.Repeat("*", len(value))
-	}
-	return value[:2] + strings.Repeat("*", len(value)-4) + value[len(value)-2:]
+	return "********"
 }
 
 // MaskValueFull returns a fully masked value
 func MaskValueFull(value string) string {
-	return strings.Repeat("*", len(value))
+	return "********"
+}
+
+// SanitizeTerminal makes untrusted text safe for human terminal rendering.
+// Newline, tab, and ordinary Unicode remain readable; controls are escaped.
+func SanitizeTerminal(value string) string {
+	var out strings.Builder
+	for _, r := range value {
+		switch {
+		case r == '\n' || r == '\t':
+			out.WriteRune(r)
+		case r < 0x20 || r == 0x7f:
+			fmt.Fprintf(&out, "\\x%02x", r)
+		case r >= 0x80 && r <= 0x9f:
+			fmt.Fprintf(&out, "\\u%04x", r)
+		default:
+			out.WriteRune(r)
+		}
+	}
+	return out.String()
 }

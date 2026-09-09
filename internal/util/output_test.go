@@ -9,23 +9,31 @@ import (
 )
 
 var _ = Describe("MaskValue", func() {
-	DescribeTable("masks per length",
+	DescribeTable("uses a fixed mask without fragments or length",
 		func(input, want string) {
 			Expect(MaskValue(input)).To(Equal(want))
 		},
-		Entry("empty stays empty", "", ""),
-		Entry("two chars are fully masked", "ab", "**"),
-		Entry("8 chars are fully masked (boundary)", "12345678", "********"),
-		Entry("9+ chars keep first/last two", "123456789", "12*****89"),
-		Entry("long values preserve first/last two", "verylongsecretvalue", "ve***************ue"),
+		Entry("empty", "", "********"),
+		Entry("short", "ab", "********"),
+		Entry("long", "verylongsecretvalue", "********"),
 	)
 })
 
 var _ = Describe("MaskValueFull", func() {
-	It("returns asterisks of the same length", func() {
-		Expect(MaskValueFull("")).To(BeEmpty())
-		Expect(MaskValueFull("hello")).To(Equal("*****"))
-		Expect(MaskValueFull("12345678")).To(Equal("********"))
+	It("also returns a fixed mask", func() {
+		Expect(MaskValueFull("")).To(Equal("********"))
+		Expect(MaskValueFull("hello")).To(Equal("********"))
+	})
+})
+
+var _ = Describe("SanitizeTerminal", func() {
+	It("escapes terminal controls while retaining useful text", func() {
+		input := "safe\n\t\x1b[2J\r\x1b]52;c;data\a\u009bKunicode ✓"
+		got := SanitizeTerminal(input)
+		Expect(got).To(ContainSubstring("safe\n\t"))
+		Expect(got).To(ContainSubstring("\\x1b[2J\\x0d\\x1b]52;c;data\\x07\\u009bK"))
+		Expect(got).To(ContainSubstring("unicode ✓"))
+		Expect(got).NotTo(ContainSubstring("\x1b"))
 	})
 })
 

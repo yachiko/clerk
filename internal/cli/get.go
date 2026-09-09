@@ -200,8 +200,8 @@ func parseNameVersionLabel(input string) (string, int64, string, error) {
 func outputParameter(param *aws.Parameter, displayValue string) error {
 	// Value-only output
 	if getValueOnly {
-		fmt.Println(displayValue)
-		return nil
+		_, err := fmt.Fprint(os.Stdout, displayValue)
+		return err
 	}
 
 	// JSON output
@@ -236,29 +236,29 @@ func outputParameter(param *aws.Parameter, displayValue string) error {
 	bold := color.New(color.Bold)
 	cyan := color.New(color.FgCyan)
 
-	_, _ = bold.Println("Name:", param.Name)
+	_, _ = bold.Println("Name:", util.SanitizeTerminal(param.Name))
 
 	// Show value with appropriate styling
 	_, _ = bold.Print("Value: ")
 	if getMask {
-		color.Yellow(displayValue)
+		color.Yellow(util.SanitizeTerminal(displayValue))
 	} else {
-		fmt.Println(displayValue)
+		fmt.Println(util.SanitizeTerminal(displayValue))
 	}
 
-	_, _ = cyan.Printf("Type: %s\n", param.Type)
+	_, _ = cyan.Printf("Type: %s\n", util.SanitizeTerminal(param.Type))
 	_, _ = cyan.Printf("Version: %d\n", param.Version)
 	_, _ = cyan.Printf("Last Modified: %s\n", param.LastModifiedDate.Format(time.RFC3339))
 
 	if param.ARN != "" {
-		_, _ = cyan.Printf("ARN: %s\n", param.ARN)
+		_, _ = cyan.Printf("ARN: %s\n", util.SanitizeTerminal(param.ARN))
 	}
 
 	if len(param.Tags) > 0 {
 		_, _ = cyan.Print("Tags: ")
 		var tagPairs []string
 		for k, v := range param.Tags {
-			tagPairs = append(tagPairs, fmt.Sprintf("%s=%s", k, v))
+			tagPairs = append(tagPairs, fmt.Sprintf("%s=%s", util.SanitizeTerminal(k), util.SanitizeTerminal(v)))
 		}
 		fmt.Println(strings.Join(tagPairs, ", "))
 	}
