@@ -201,7 +201,7 @@ func (m Model) renderBrowseView() string {
 		header += "   " + headerStyle.Render(fmt.Sprintf("%16s", "MODIFIED"+m.sortIndicator(SortByModified))) + "  "
 	}
 	lines = append(lines, header)
-	lines = append(lines, "  "+separatorStyle.Render(strings.Repeat("─", m.state.Width-4)))
+	lines = append(lines, "  "+separatorStyle.Render(strings.Repeat("─", max(0, m.state.Width-4))))
 
 	// Items - calculate how many we can show
 	visible := m.visibleRows()
@@ -209,7 +209,11 @@ func (m Model) renderBrowseView() string {
 		visible = 10
 	}
 
-	if len(m.state.FilteredItems) == 0 {
+	rowCount := len(m.state.FilteredItems)
+	if m.state.Mode == ViewModeTree {
+		rowCount = len(m.state.TreeNodes)
+	}
+	if rowCount == 0 {
 		lines = append(lines, dimStyle.Render("    No parameters found"))
 		// Pad with empty lines to fill space
 		for i := len(lines); i < m.state.Height-2; i++ {
@@ -218,8 +222,8 @@ func (m Model) renderBrowseView() string {
 	} else {
 		start := m.state.ScrollOffset
 		end := start + visible
-		if end > len(m.state.FilteredItems) {
-			end = len(m.state.FilteredItems)
+		if end > rowCount {
+			end = rowCount
 		}
 
 		var itemLines []string
@@ -241,7 +245,7 @@ func (m Model) renderBrowseView() string {
 	}
 
 	// Footer
-	lines = append(lines, "  "+separatorStyle.Render(strings.Repeat("─", m.state.Width-4)))
+	lines = append(lines, "  "+separatorStyle.Render(strings.Repeat("─", max(0, m.state.Width-4))))
 
 	// Status/Error message
 	var statusLine string
@@ -465,7 +469,7 @@ func (m Model) renderDescribeView() string {
 	output = append(output, box)
 
 	// Separator line (matching browse view structure)
-	output = append(output, "  "+separatorStyle.Render(strings.Repeat("─", m.state.Width-4)))
+	output = append(output, "  "+separatorStyle.Render(strings.Repeat("─", max(0, m.state.Width-4))))
 
 	// Calculate panel dimensions
 	leftWidth := 35
@@ -499,7 +503,7 @@ func (m Model) renderDescribeView() string {
 	}
 
 	// Footer separator (matching browse view structure)
-	output = append(output, "  "+separatorStyle.Render(strings.Repeat("─", m.state.Width-4)))
+	output = append(output, "  "+separatorStyle.Render(strings.Repeat("─", max(0, m.state.Width-4))))
 
 	// Status/Error message
 	var statusLine string

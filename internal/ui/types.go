@@ -77,6 +77,8 @@ type State struct {
 	// Describe view state
 	DescribeEntry         *cache.CacheEntry
 	DescribeParamName     string // Track parameter name for lazy loading
+	DescribeGeneration    uint64 // Invalidates results from an earlier detail request.
+	DescribeLoading       bool
 	DescribeValue         string
 	DescribeMasked        bool
 	DescribeHistory       []HistoryEntry

@@ -3,7 +3,7 @@ package ui
 import (
 	"context"
 	"fmt"
-	"os"
+	"sort"
 	"strings"
 	"time"
 
@@ -26,6 +26,7 @@ type Model struct {
 	searchInput textinput.Model
 	ready       bool
 	quitting    bool
+	refreshing  bool
 }
 
 // NewModel creates a new browse model
@@ -103,7 +104,7 @@ func (m Model) doBackgroundRefresh() tea.Cmd {
 // startRefreshWithProgress starts the refresh and returns a sub for progress updates
 func startRefreshWithProgress(cacheMgr *cache.Manager, client *aws.Client, cfg *config.Config) tea.Msg {
 	// Create a channel for progress
-	progressCh := make(chan int, 100)
+	progressCh := make(chan refreshEvent, 100)
 
 	// Start refresh in background
 	go func() {
@@ -111,7 +112,7 @@ func startRefreshWithProgress(cacheMgr *cache.Manager, client *aws.Client, cfg *
 
 		progressCallback := func(current, total int) {
 			select {
-			case progressCh <- current:
+			case progressCh <- refreshEvent{current: current}:
 			default:
 				// Channel full, skip this update
 			}
@@ -121,11 +122,8 @@ func startRefreshWithProgress(cacheMgr *cache.Manager, client *aws.Client, cfg *
 		err := cacheMgr.Refresh(ctx, client, client.GetRegion(), cfg.ParallelFetches, progressCallback)
 
 		// Signal completion
+		progressCh <- refreshEvent{done: true, err: err}
 		close(progressCh)
-
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "[ERROR] Background refresh failed: %v\n", err)
-		}
 	}()
 
 	// Return a message that starts listening for progress
@@ -134,18 +132,25 @@ func startRefreshWithProgress(cacheMgr *cache.Manager, client *aws.Client, cfg *
 
 // refreshProgressChannelMsg carries the progress channel
 type refreshProgressChannelMsg struct {
-	ch chan int
+	ch chan refreshEvent
+}
+type refreshEvent struct {
+	current int
+	done    bool
+	err     error
 }
 
 // waitForProgress returns a command that waits for the next progress update
-func waitForProgress(ch chan int) tea.Cmd {
+func waitForProgress(ch chan refreshEvent) tea.Cmd {
 	return func() tea.Msg {
-		count, ok := <-ch
+		event, ok := <-ch
 		if !ok {
-			// Channel closed, refresh is done
-			return backgroundRefreshCompleteMsg{loadFromCache: true}
+			return nil
 		}
-		return backgroundRefreshProgressMsg{current: count, ch: ch}
+		if event.done {
+			return backgroundRefreshCompleteMsg{loadFromCache: true, err: event.err}
+		}
+		return backgroundRefreshProgressMsg{current: event.current, ch: ch}
 	}
 }
 
@@ -156,24 +161,29 @@ type entriesLoadedMsg struct {
 type backgroundRefreshStartMsg struct{}
 type backgroundRefreshProgressMsg struct {
 	current int
-	ch      chan int
+	ch      chan refreshEvent
 }
 type backgroundRefreshCompleteMsg struct {
 	// loadFromCache signals that the handler should re-read entries from
 	// the cache manager rather than carrying them on the message.
 	loadFromCache bool
+	err           error
 }
 
 type statusMsg string
 type errorMsg string
 type clearStatusMsg struct{}
 type describeLoadedMsg struct {
-	value   string
-	history []HistoryEntry
+	name       string
+	generation uint64
+	value      string
+	history    []HistoryEntry
 }
 
 type versionValuesLoadedMsg struct {
-	versions map[int64]string // version -> value mapping
+	name       string
+	generation uint64
+	versions   map[int64]string // version -> value mapping
 }
 
 type editCompleteMsg struct {
@@ -183,21 +193,32 @@ type editCompleteMsg struct {
 	err      error
 }
 
+type editPreparedMsg struct {
+	name     string
+	original aws.Parameter
+	session  *util.EditorSession
+	err      error
+}
+
 type deleteCompleteMsg struct {
 	name string
 	err  error
 }
 
 type moveCompleteMsg struct {
-	source string
-	target string
-	err    error
+	source      string
+	target      string
+	destination *aws.Parameter
+	warning     string
+	err         error
 }
 
 type copyCompleteMsg struct {
-	source string
-	target string
-	err    error
+	source      string
+	target      string
+	destination *aws.Parameter
+	warning     string
+	err         error
 }
 
 // Label operation messages
@@ -215,11 +236,15 @@ type tagCompleteMsg struct {
 }
 
 type tagsRefreshMsg struct {
-	tags map[string]string
+	name       string
+	generation uint64
+	tags       map[string]string
 }
 
 type historyRefreshMsg struct {
-	history []aws.ParameterHistory
+	name       string
+	generation uint64
+	history    []aws.ParameterHistory
 }
 
 // Update implements tea.Model
@@ -378,6 +403,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case backgroundRefreshStartMsg:
+		if m.refreshing {
+			return m, nil
+		}
+		m.refreshing = true
 		// Show appropriate message based on whether cache is empty
 		if len(m.state.Entries) == 0 {
 			m.state.StatusMessage = "Loading parameters from AWS..."
@@ -401,6 +430,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, waitForProgress(msg.ch)
 
 	case backgroundRefreshCompleteMsg:
+		m.refreshing = false
+		if msg.err != nil {
+			if len(m.state.Entries) > 0 {
+				m.state.StatusMessage = "Refresh failed; showing cached parameters"
+			} else {
+				m.state.ErrorMessage = "Refresh failed: " + msg.err.Error()
+			}
+			return m, nil
+		}
 		// Load entries from cache
 		entries := m.cache.GetAll()
 
@@ -442,16 +480,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case describeLoadedMsg:
+		if msg.generation != m.state.DescribeGeneration || msg.name != m.state.DescribeParamName || m.state.Mode != ViewModeDescribe {
+			return m, nil
+		}
 		m.state.DescribeValue = msg.value
 		m.state.DescribeHistory = msg.history
 		m.state.HistoryIndex = 0
-		// Store param name for lazy loading
-		if m.state.DescribeEntry != nil {
-			m.state.DescribeParamName = m.state.DescribeEntry.Name
-		}
+		m.state.DescribeLoading = false
 		return m, nil
 
 	case versionValuesLoadedMsg:
+		if msg.generation != m.state.DescribeGeneration || msg.name != m.state.DescribeParamName || m.state.Mode != ViewModeDescribe {
+			return m, nil
+		}
 		// Update history entries with loaded values
 		for i := range m.state.DescribeHistory {
 			if value, ok := msg.versions[m.state.DescribeHistory[i].Version]; ok {
@@ -486,10 +527,60 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			entry.LastModifiedDate = time.Now()
 			_ = m.cache.Update(*entry)
 		}
+		if m.state.Mode == ViewModeDescribe && m.state.DescribeParamName == msg.name {
+			m.state.DescribeValue = msg.newValue
+			m.state.DescribeLoading = false
+			found := false
+			for i := range m.state.DescribeHistory {
+				if m.state.DescribeHistory[i].Version == msg.version {
+					m.state.DescribeHistory[i].Value, m.state.DescribeHistory[i].ValueLoaded, m.state.HistoryIndex, found = msg.newValue, true, i, true
+					break
+				}
+			}
+			if !found {
+				m.state.DescribeHistory = append([]HistoryEntry{{Version: msg.version, Value: msg.newValue, ValueLoaded: true, Modified: time.Now().Format(time.RFC3339)}}, m.state.DescribeHistory...)
+				m.state.HistoryIndex = 0
+			}
+		}
 
 		return m, func() tea.Msg {
 			return statusMsg(fmt.Sprintf("Updated %s to version %d", msg.name, msg.version))
 		}
+
+	case editPreparedMsg:
+		if msg.err != nil {
+			return m, func() tea.Msg { return errorMsg(msg.err.Error()) }
+		}
+		// tea.ExecProcess releases and restores the terminal around an
+		// interactive editor. Saving deliberately uses a fresh deadline after
+		// the user returns, rather than consuming the editor's wall time.
+		return m, tea.ExecProcess(msg.session.Command(), func(runErr error) tea.Msg {
+			defer func() { _ = msg.session.Close() }()
+			if runErr != nil {
+				return editCompleteMsg{err: fmt.Errorf("editor error: %w", runErr)}
+			}
+			newValue, err := msg.session.Read()
+			if err != nil {
+				return editCompleteMsg{err: fmt.Errorf("failed to read edited value: %w", err)}
+			}
+			if newValue == msg.original.Value {
+				return statusMsg("No changes made")
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			current, err := m.client.GetParameter(ctx, msg.name, false)
+			if err != nil {
+				return editCompleteMsg{err: fmt.Errorf("failed to check current version: %w", err)}
+			}
+			if current.Version != msg.original.Version {
+				return editCompleteMsg{err: fmt.Errorf("parameter changed from version %d to %d while editing; review and retry", msg.original.Version, current.Version)}
+			}
+			output, err := m.client.PutParameter(ctx, &aws.PutParameterInput{Name: msg.name, Value: newValue, Type: msg.original.Type, Overwrite: true})
+			if err != nil {
+				return editCompleteMsg{err: fmt.Errorf("failed to update: %w", err)}
+			}
+			return editCompleteMsg{name: msg.name, newValue: newValue, version: output.Version}
+		})
 
 	case deleteCompleteMsg:
 		if msg.err != nil {
@@ -514,12 +605,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		// Remove from cache
 		_ = m.cache.Delete(msg.source)
+		if msg.destination != nil {
+			_ = m.cache.Update(cache.CacheEntry{Name: msg.destination.Name, Type: msg.destination.Type, Version: msg.destination.Version, LastModifiedDate: msg.destination.LastModifiedDate, Tags: msg.destination.Tags})
+		}
 
 		// Reload entries from cache
+		status := fmt.Sprintf("Moved %s to %s", msg.source, msg.target)
+		if msg.warning != "" {
+			status += " (remote write succeeded; cache refresh needed)"
+		}
 		return m, tea.Batch(
 			m.loadEntries,
 			func() tea.Msg {
-				return statusMsg(fmt.Sprintf("Moved %s to %s", msg.source, msg.target))
+				return statusMsg(status)
 			},
 		)
 
@@ -528,11 +626,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, func() tea.Msg { return errorMsg("Copy failed: " + msg.err.Error()) }
 		}
 
+		if msg.destination != nil {
+			_ = m.cache.Update(cache.CacheEntry{Name: msg.destination.Name, Type: msg.destination.Type, Version: msg.destination.Version, LastModifiedDate: msg.destination.LastModifiedDate, Tags: msg.destination.Tags})
+		}
 		// Reload entries from cache
+		status := fmt.Sprintf("Copied %s to %s", msg.source, msg.target)
+		if msg.warning != "" {
+			status += " (remote write succeeded; cache refresh needed)"
+		}
 		return m, tea.Batch(
 			m.loadEntries,
 			func() tea.Msg {
-				return statusMsg(fmt.Sprintf("Copied %s to %s", msg.source, msg.target))
+				return statusMsg(status)
 			},
 		)
 
@@ -568,12 +673,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		)
 
 	case tagsRefreshMsg:
-		if m.state.DescribeEntry != nil {
+		if msg.generation == m.state.DescribeGeneration && msg.name == m.state.DescribeParamName && m.state.DescribeEntry != nil {
 			m.state.DescribeEntry.Tags = msg.tags
+			for i := range m.state.Entries {
+				if m.state.Entries[i].Name == msg.name {
+					m.state.Entries[i].Tags = msg.tags
+				}
+			}
+			m.filterEntries()
 		}
 		return m, nil
 
 	case historyRefreshMsg:
+		if msg.generation != m.state.DescribeGeneration || msg.name != m.state.DescribeParamName || m.state.Mode != ViewModeDescribe {
+			return m, nil
+		}
 		// Save the version the user was viewing before refresh
 		var previousVersion int64
 		if m.state.HistoryIndex >= 0 && m.state.HistoryIndex < len(m.state.DescribeHistory) {
@@ -700,7 +814,7 @@ func (m Model) handleBrowseKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case "down", "j":
-		if m.state.SelectedIndex < len(m.state.FilteredItems)-1 {
+		if m.state.SelectedIndex < m.visibleItemCount()-1 {
 			m.state.SelectedIndex++
 			m.adjustScroll()
 		}
@@ -716,8 +830,8 @@ func (m Model) handleBrowseKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case "pgdown", "right":
 		m.state.SelectedIndex += m.visibleRows()
-		if m.state.SelectedIndex >= len(m.state.FilteredItems) {
-			m.state.SelectedIndex = len(m.state.FilteredItems) - 1
+		if m.state.SelectedIndex >= m.visibleItemCount() {
+			m.state.SelectedIndex = m.visibleItemCount() - 1
 		}
 		if m.state.SelectedIndex < 0 {
 			m.state.SelectedIndex = 0
@@ -731,7 +845,7 @@ func (m Model) handleBrowseKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case "end":
-		m.state.SelectedIndex = len(m.state.FilteredItems) - 1
+		m.state.SelectedIndex = m.visibleItemCount() - 1
 		if m.state.SelectedIndex < 0 {
 			m.state.SelectedIndex = 0
 		}
@@ -753,8 +867,7 @@ func (m Model) handleBrowseKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case "r":
 		// Manual refresh cache
-		m.state.StatusMessage = "Refreshing cache..."
-		return m, m.doBackgroundRefresh()
+		return m, func() tea.Msg { return backgroundRefreshStartMsg{} }
 
 	case "s":
 		// Cycle through sort options: name -> modified -> version -> name
@@ -818,7 +931,10 @@ func (m Model) handleBrowseKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				}
 			}
 			m.state.DescribeEntry = entry
-			m.state.DescribeValue = "" // Clear previous value to show "Loading..."
+			m.state.DescribeGeneration++
+			m.state.DescribeParamName = paramName
+			m.state.DescribeLoading = true
+			m.state.DescribeValue = ""
 			m.state.DescribeHistory = nil
 			m.state.HistoryIndex = 0
 			m.state.HistoryScrollOffset = 0
@@ -828,7 +944,7 @@ func (m Model) handleBrowseKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.state.Mode = ViewModeDescribe
 			// Use config to determine if value should be masked by default
 			m.state.DescribeMasked = !m.config.DecryptByDefault
-			return m, m.loadDescribe(paramName)
+			return m, m.loadDescribe(paramName, m.state.DescribeGeneration)
 		}
 		return m, nil
 
@@ -906,6 +1022,13 @@ func (m *Model) getSelectedEntry() *cache.CacheEntry {
 	return nil
 }
 
+func (m *Model) visibleItemCount() int {
+	if m.state.Mode == ViewModeTree {
+		return len(m.state.TreeNodes)
+	}
+	return len(m.state.FilteredItems)
+}
+
 // handleDescribeKeys handles keys in describe view
 func (m Model) handleDescribeKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// Handle label input mode first
@@ -919,6 +1042,11 @@ func (m Model) handleDescribeKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	switch msg.String() {
 	case "esc", "q":
+		m.state.DescribeGeneration++
+		m.state.DescribeLoading = false
+		m.state.DescribeParamName = ""
+		m.state.DescribeValue = ""
+		m.state.DescribeHistory = nil
 		m.state.Mode = m.state.PreviousMode
 		// Reset scroll offsets
 		m.state.HistoryScrollOffset = 0
@@ -929,6 +1057,9 @@ func (m Model) handleDescribeKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "x":
 		// Toggle masked/unmasked
 		m.state.DescribeMasked = !m.state.DescribeMasked
+		if !m.state.DescribeMasked && m.state.DescribeValue == "" {
+			return m.updateSelectedVersion()
+		}
 		return m, nil
 
 	case "w":
@@ -939,26 +1070,29 @@ func (m Model) handleDescribeKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case "c":
 		// Copy value
-		if m.state.DescribeValue != "" {
+		if !m.state.DescribeLoading && m.state.DescribeValue != "" {
 			return m, m.copyValue(m.state.DescribeValue)
 		}
 		return m, nil
 
 	case "C":
 		// Copy parameter name/path
-		if m.state.DescribeParamName != "" {
+		if !m.state.DescribeLoading && m.state.DescribeParamName != "" {
 			return m, m.copyValue(m.state.DescribeParamName)
 		}
 		return m, nil
 
 	case "e":
 		// Edit parameter
-		if m.state.DescribeParamName != "" {
+		if !m.state.DescribeLoading && m.state.DescribeParamName != "" {
 			return m, m.editSecret(m.state.DescribeParamName)
 		}
 		return m, nil
 
 	case "tab":
+		if len(m.state.DescribeHistory) == 0 {
+			return m, nil
+		}
 		// Navigate to older version (increase index), loop to beginning
 		if m.state.HistoryIndex < len(m.state.DescribeHistory)-1 {
 			m.state.HistoryIndex++
@@ -969,6 +1103,9 @@ func (m Model) handleDescribeKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.updateSelectedVersion()
 
 	case "shift+tab":
+		if len(m.state.DescribeHistory) == 0 {
+			return m, nil
+		}
 		// Navigate to newer version (decrease index), loop to end
 		if m.state.HistoryIndex > 0 {
 			m.state.HistoryIndex--
@@ -1118,7 +1255,7 @@ func (m Model) handleDescribeKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 // updateSelectedVersion updates the displayed value and triggers lazy loading if needed
 func (m Model) updateSelectedVersion() (tea.Model, tea.Cmd) {
-	if m.state.HistoryIndex >= len(m.state.DescribeHistory) {
+	if m.state.HistoryIndex < 0 || m.state.HistoryIndex >= len(m.state.DescribeHistory) {
 		return m, nil
 	}
 
@@ -1249,6 +1386,10 @@ func (m *Model) updatePathSuggestions() {
 
 // filterEntries filters and sorts entries based on search query, type filter, and sort order
 func (m *Model) filterEntries() {
+	selectedName := ""
+	if entry := m.getSelectedEntry(); entry != nil {
+		selectedName = entry.Name
+	}
 	var filtered []cache.CacheEntry
 	for _, e := range m.state.Entries {
 		// Apply search filter
@@ -1270,6 +1411,24 @@ func (m *Model) filterEntries() {
 
 	// Apply sorting
 	m.sortEntries()
+	m.buildTree()
+	if selectedName != "" {
+		if m.state.Mode == ViewModeTree {
+			for i, n := range m.state.TreeNodes {
+				if !n.IsDir && n.Path == selectedName {
+					m.state.SelectedIndex = i
+					break
+				}
+			}
+		} else {
+			for i := range m.state.FilteredItems {
+				if m.state.FilteredItems[i].Name == selectedName {
+					m.state.SelectedIndex = i
+					break
+				}
+			}
+		}
+	}
 
 	// Reset selection if out of bounds
 	if m.state.SelectedIndex >= len(m.state.FilteredItems) {
@@ -1278,11 +1437,13 @@ func (m *Model) filterEntries() {
 	if m.state.SelectedIndex < 0 {
 		m.state.SelectedIndex = 0
 	}
+	m.adjustScroll()
 }
 
 // sortEntries sorts FilteredItems based on the current sort type and direction
 func (m *Model) sortEntries() {
 	if len(m.state.FilteredItems) == 0 {
+		m.buildTree()
 		return
 	}
 
@@ -1316,6 +1477,9 @@ func (m *Model) sortEntries() {
 				}
 			}
 		}
+	}
+	if m.state.Mode == ViewModeTree {
+		m.buildTree()
 	}
 }
 
@@ -1369,6 +1533,23 @@ func matchSearch(query, name string) bool {
 
 // adjustScroll adjusts scroll offset to keep selection visible
 func (m *Model) adjustScroll() {
+	count := len(m.state.FilteredItems)
+	if m.state.Mode == ViewModeTree {
+		count = len(m.state.TreeNodes)
+	}
+	if count == 0 {
+		m.state.SelectedIndex, m.state.ScrollOffset = 0, 0
+		return
+	}
+	if m.state.SelectedIndex < 0 {
+		m.state.SelectedIndex = 0
+	}
+	if m.state.SelectedIndex >= count {
+		m.state.SelectedIndex = count - 1
+	}
+	if m.state.ScrollOffset < 0 {
+		m.state.ScrollOffset = 0
+	}
 	visible := m.visibleRows()
 	if m.state.SelectedIndex < m.state.ScrollOffset {
 		m.state.ScrollOffset = m.state.SelectedIndex
@@ -1391,10 +1572,11 @@ func (m *Model) visibleRows() int {
 // buildTree builds tree structure from entries
 func (m *Model) buildTree() {
 	m.state.TreeNodes = buildTreeNodes(m.state.FilteredItems, m.state.ExpandedPaths)
+	m.adjustScroll()
 }
 
 // loadDescribe loads describe data for a parameter
-func (m Model) loadDescribe(name string) tea.Cmd {
+func (m Model) loadDescribe(name string, generation uint64) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
@@ -1404,8 +1586,10 @@ func (m Model) loadDescribe(name string) tea.Cmd {
 			return errorMsg("Invalid parameter name")
 		}
 
-		// Get current value
-		param, err := m.client.GetParameter(ctx, name, true)
+		// Values are explicitly requested only for the current version. History
+		// begins as metadata, so ciphertext can never be displayed as plaintext.
+		decrypt := m.config != nil && m.config.DecryptByDefault
+		param, err := m.client.GetParameter(ctx, name, decrypt)
 		if err != nil {
 			// Check if it's an auth/network error
 			errMsg := err.Error()
@@ -1419,57 +1603,28 @@ func (m Model) loadDescribe(name string) tea.Cmd {
 
 		var historyEntries []HistoryEntry
 
-		// Check if we have cached version history
-		if cacheEntry, ok := m.cache.Get(name); ok && len(cacheEntry.VersionHistory) > 0 {
-			// Use cached history metadata and fetch values
-			allVersions, err := m.client.GetParameterHistory(ctx, name, 50, true)
-			if err != nil {
-				// Continue without history
-				return describeLoadedMsg{
-					value:   param.Value,
-					history: []HistoryEntry{{Version: param.Version, Value: param.Value, Modified: param.LastModifiedDate.Format(time.RFC3339), ValueLoaded: true}},
-				}
+		allVersions, err := m.client.GetParameterHistory(ctx, name, 50, false)
+		if err != nil {
+			value := ""
+			if decrypt {
+				value = param.Value
 			}
-
-			// Build history entries with all values
-			for _, h := range allVersions {
-				historyEntries = append(historyEntries, HistoryEntry{
-					Version:     h.Version,
-					Value:       h.Value,
-					Modified:    h.LastModifiedDate.Format(time.RFC3339),
-					ValueLoaded: true,
-					Labels:      h.Labels,
-				})
-			}
-		} else {
-			// No cached history, fetch from AWS
-			allVersions, err := m.client.GetParameterHistory(ctx, name, 50, true)
-			if err != nil {
-				// Continue without history
-				return describeLoadedMsg{
-					value:   param.Value,
-					history: []HistoryEntry{{Version: param.Version, Value: param.Value, Modified: param.LastModifiedDate.Format(time.RFC3339), ValueLoaded: true}},
-				}
-			}
-
-			// Build history entries with all values
-			for _, h := range allVersions {
-				historyEntries = append(historyEntries, HistoryEntry{
-					Version:     h.Version,
-					Value:       h.Value,
-					Modified:    h.LastModifiedDate.Format(time.RFC3339),
-					ValueLoaded: true,
-					Labels:      h.Labels,
-				})
-			}
+			return describeLoadedMsg{name: name, generation: generation, value: value, history: []HistoryEntry{{Version: param.Version, Value: value, Modified: param.LastModifiedDate.Format(time.RFC3339), ValueLoaded: decrypt}}}
+		}
+		for _, h := range allVersions {
+			historyEntries = append(historyEntries, HistoryEntry{Version: h.Version, Modified: h.LastModifiedDate.Format(time.RFC3339), Labels: h.Labels})
 		}
 
-		// Reverse to show newest first
-		for i, j := 0, len(historyEntries)-1; i < j; i, j = i+1, j-1 {
-			historyEntries[i], historyEntries[j] = historyEntries[j], historyEntries[i]
+		// The newest history record is the selected value. Mark precisely that
+		// version loaded; service ordering is normalized below.
+		sort.Slice(historyEntries, func(i, j int) bool { return historyEntries[i].Version > historyEntries[j].Version })
+		for i := range historyEntries {
+			if decrypt && historyEntries[i].Version == param.Version {
+				historyEntries[i].Value, historyEntries[i].ValueLoaded = param.Value, true
+				break
+			}
 		}
-
-		return describeLoadedMsg{
+		return describeLoadedMsg{name: name, generation: generation,
 			value:   param.Value,
 			history: historyEntries,
 		}
@@ -1517,13 +1672,13 @@ func (m Model) copyValue(value string) tea.Cmd {
 // editSecret opens an editor to edit the parameter
 func (m Model) editSecret(name string) tea.Cmd {
 	return func() tea.Msg {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 
 		// Get current value
 		param, err := m.client.GetParameter(ctx, name, true)
 		if err != nil {
-			return editCompleteMsg{err: fmt.Errorf("failed to get parameter: %w", err)}
+			return editPreparedMsg{err: fmt.Errorf("failed to get parameter: %w", err)}
 		}
 
 		// Determine file extension based on content
@@ -1535,37 +1690,13 @@ func (m Model) editSecret(name string) tea.Cmd {
 			ext = ".xml"
 		}
 
-		// Open in editor
+		// Prepare a secure file. Update executes its process through Bubble Tea.
 		editor := util.NewEditor(util.EditorConfig{})
-		newValue, err := editor.Edit(param.Value, ext)
+		session, err := editor.Prepare(param.Value, ext)
 		if err != nil {
-			return editCompleteMsg{err: fmt.Errorf("editor error: %w", err)}
+			return editPreparedMsg{err: fmt.Errorf("editor error: %w", err)}
 		}
-
-		// Check if value changed
-		newValue = strings.TrimSpace(newValue)
-		if newValue == param.Value {
-			return statusMsg("No changes made")
-		}
-
-		// Update parameter
-		input := &aws.PutParameterInput{
-			Name:      name,
-			Value:     newValue,
-			Type:      param.Type,
-			Overwrite: true,
-		}
-
-		output, err := m.client.PutParameter(ctx, input)
-		if err != nil {
-			return editCompleteMsg{err: fmt.Errorf("failed to update: %w", err)}
-		}
-
-		return editCompleteMsg{
-			name:     name,
-			newValue: newValue,
-			version:  output.Version,
-		}
+		return editPreparedMsg{name: name, original: *param, session: session}
 	}
 }
 
@@ -1599,6 +1730,9 @@ func (m Model) deleteSecret(name string) tea.Cmd {
 // moveSecret moves/renames a parameter
 func (m Model) moveSecret(source, target string) tea.Cmd {
 	return func() tea.Msg {
+		if source == target {
+			return moveCompleteMsg{source: source, target: target, err: fmt.Errorf("source and destination are the same parameter")}
+		}
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 
@@ -1630,13 +1764,21 @@ func (m Model) moveSecret(source, target string) tea.Cmd {
 			return moveCompleteMsg{source: source, target: target, err: fmt.Errorf("failed to delete source: %w", err)}
 		}
 
-		return moveCompleteMsg{source: source, target: target}
+		destination, getErr := m.client.GetParameter(ctx, target, false)
+		warning := ""
+		if getErr != nil {
+			warning = getErr.Error()
+		}
+		return moveCompleteMsg{source: source, target: target, destination: destination, warning: warning}
 	}
 }
 
 // copySecretAs copies a parameter to a new name
 func (m Model) copySecretAs(source, target string) tea.Cmd {
 	return func() tea.Msg {
+		if source == target {
+			return copyCompleteMsg{source: source, target: target, err: fmt.Errorf("source and destination are the same parameter")}
+		}
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 
@@ -1662,7 +1804,12 @@ func (m Model) copySecretAs(source, target string) tea.Cmd {
 			return copyCompleteMsg{source: source, target: target, err: fmt.Errorf("failed to copy: %w", err)}
 		}
 
-		return copyCompleteMsg{source: source, target: target}
+		destination, getErr := m.client.GetParameter(ctx, target, false)
+		warning := ""
+		if getErr != nil {
+			warning = getErr.Error()
+		}
+		return copyCompleteMsg{source: source, target: target, destination: destination, warning: warning}
 	}
 }
 
@@ -1727,28 +1874,20 @@ func (m Model) handleConfirmKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 // loadVersionValues loads values for specific versions
 func (m Model) loadVersionValues(paramName string, versions []int64) tea.Cmd {
+	generation := m.state.DescribeGeneration
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 
-		// Get history with decryption (max 50 per API limit)
-		history, err := m.client.GetParameterHistory(ctx, paramName, 50, true)
-		if err != nil {
-			return errorMsg("Failed to load version values: " + err.Error())
-		}
-
-		// Build map of version -> value for requested versions
 		versionMap := make(map[int64]string)
-		for _, h := range history {
-			for _, targetVersion := range versions {
-				if h.Version == targetVersion {
-					versionMap[targetVersion] = h.Value
-					break
-				}
+		for _, version := range versions {
+			param, err := m.client.GetParameterByVersion(ctx, paramName, version, true)
+			if err != nil {
+				return errorMsg("Failed to load version value: " + err.Error())
 			}
+			versionMap[version] = param.Value
 		}
-
-		return versionValuesLoadedMsg{versions: versionMap}
+		return versionValuesLoadedMsg{name: paramName, generation: generation, versions: versionMap}
 	}
 }
 
@@ -2028,31 +2167,33 @@ func (m Model) executeTagAction(action, input string) tea.Cmd {
 
 // refreshTags refreshes tags for the current parameter
 func (m Model) refreshTags() tea.Cmd {
+	name, generation := m.state.DescribeParamName, m.state.DescribeGeneration
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 
-		tags, err := m.client.GetParameterTags(ctx, m.state.DescribeParamName)
+		tags, err := m.client.GetParameterTags(ctx, name)
 		if err != nil {
 			return errorMsg(fmt.Sprintf("Failed to refresh tags: %v", err))
 		}
 
-		return tagsRefreshMsg{tags: tags}
+		return tagsRefreshMsg{name: name, generation: generation, tags: tags}
 	}
 }
 
 // refreshHistory refreshes the parameter history to show updated labels
 func (m Model) refreshHistory() tea.Cmd {
+	name, generation := m.state.DescribeParamName, m.state.DescribeGeneration
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 
-		history, err := m.client.GetParameterHistory(ctx, m.state.DescribeParamName, 50, false)
+		history, err := m.client.GetParameterHistory(ctx, name, 50, false)
 		if err != nil {
 			return errorMsg(fmt.Sprintf("Failed to refresh history: %v", err))
 		}
 
-		return historyRefreshMsg{history: history}
+		return historyRefreshMsg{name: name, generation: generation, history: history}
 	}
 }
 
@@ -2061,10 +2202,12 @@ func convertHistory(awsHistory []aws.ParameterHistory) []HistoryEntry {
 	var entries []HistoryEntry
 	for _, h := range awsHistory {
 		entries = append(entries, HistoryEntry{
-			Version:     h.Version,
-			Value:       h.Value,
+			Version: h.Version,
+			// A metadata response may include ciphertext. Only an explicit
+			// decrypted version read sets ValueLoaded.
+			Value:       "",
 			Modified:    h.LastModifiedDate.Format("2006-01-02 15:04"),
-			ValueLoaded: h.Value != "", // Value is loaded if not empty
+			ValueLoaded: false,
 			Labels:      h.Labels,
 		})
 	}

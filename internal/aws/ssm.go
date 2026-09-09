@@ -312,12 +312,16 @@ func (c *Client) DeleteParameter(ctx context.Context, name string) error {
 	return nil
 }
 
-// GetParameterHistory retrieves version history for a parameter
-func (c *Client) GetParameterHistory(ctx context.Context, name string, maxResults int32, withDecryption bool) ([]ParameterHistory, error) {
+// GetParameterHistory retrieves all available version history. pageSize controls
+// the service page size only; it is deliberately not a total-result cap.
+func (c *Client) GetParameterHistory(ctx context.Context, name string, pageSize int32, withDecryption bool) ([]ParameterHistory, error) {
+	if pageSize <= 0 {
+		pageSize = 50
+	}
 	input := &ssm.GetParameterHistoryInput{
 		Name:           aws.String(name),
 		WithDecryption: aws.Bool(withDecryption),
-		MaxResults:     aws.Int32(maxResults),
+		MaxResults:     aws.Int32(pageSize),
 	}
 
 	var history []ParameterHistory
@@ -340,9 +344,6 @@ func (c *Client) GetParameterHistory(ctx context.Context, name string, maxResult
 			})
 		}
 
-		if int32(len(history)) >= maxResults {
-			break
-		}
 	}
 
 	return history, nil
@@ -620,18 +621,9 @@ func (c *Client) GetParameterByLabel(ctx context.Context, name, label string, wi
 
 // FindLabelVersion finds which version has a specific label
 func (c *Client) FindLabelVersion(ctx context.Context, name, label string) (int64, error) {
-	history, err := c.GetParameterHistory(ctx, name, 50, false)
+	param, err := c.GetParameterByLabel(ctx, name, label, false)
 	if err != nil {
 		return 0, err
 	}
-
-	for _, h := range history {
-		for _, l := range h.Labels {
-			if l == label {
-				return h.Version, nil
-			}
-		}
-	}
-
-	return 0, fmt.Errorf("label %q not found on any version", label)
+	return param.Version, nil
 }

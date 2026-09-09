@@ -22,6 +22,39 @@ type Editor struct {
 	config EditorConfig
 }
 
+// EditorSession separates secure file preparation from process execution. A
+// terminal UI can pass Command to tea.ExecProcess, which releases its terminal
+// while the editor owns stdin/stdout.
+type EditorSession struct {
+	path    string
+	command *exec.Cmd
+	editor  *Editor
+}
+
+func (e *Editor) Prepare(content, extension string) (*EditorSession, error) {
+	path, err := e.createSecureTempFile(content, extension)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create temp file: %w", err)
+	}
+	editor := e.getEditor()
+	if editor == "" {
+		_ = e.secureDelete(path)
+		return nil, fmt.Errorf("no editor found: set $EDITOR environment variable")
+	}
+	parts := strings.Fields(editor)
+	if len(parts) == 0 {
+		_ = e.secureDelete(path)
+		return nil, fmt.Errorf("empty editor command")
+	}
+	cmd := exec.Command(parts[0], append(parts[1:], path)...)
+	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
+	return &EditorSession{path: path, command: cmd, editor: e}, nil
+}
+
+func (s *EditorSession) Command() *exec.Cmd    { return s.command }
+func (s *EditorSession) Read() (string, error) { b, err := os.ReadFile(s.path); return string(b), err }
+func (s *EditorSession) Close() error          { return s.editor.secureDelete(s.path) }
+
 // NewEditor creates a new editor utility
 func NewEditor(config EditorConfig) *Editor {
 	return &Editor{config: config}
@@ -29,28 +62,20 @@ func NewEditor(config EditorConfig) *Editor {
 
 // Edit opens content in an external editor and returns the modified content
 func (e *Editor) Edit(content string, extension string) (string, error) {
-	tempPath, err := e.createSecureTempFile(content, extension)
+	session, err := e.Prepare(content, extension)
 	if err != nil {
-		return "", fmt.Errorf("failed to create temp file: %w", err)
+		return "", err
 	}
-
-	defer func() { _ = e.secureDelete(tempPath) }()
-
-	editor := e.getEditor()
-	if editor == "" {
-		return "", fmt.Errorf("no editor found: set $EDITOR environment variable")
-	}
-
-	if err := e.openEditor(editor, tempPath); err != nil {
+	defer func() { _ = session.Close() }()
+	if err := session.Command().Run(); err != nil {
 		return "", fmt.Errorf("failed to open editor: %w", err)
 	}
-
-	modified, err := os.ReadFile(tempPath)
+	modified, err := session.Read()
 	if err != nil {
 		return "", fmt.Errorf("failed to read modified content: %w", err)
 	}
 
-	return string(modified), nil
+	return modified, nil
 }
 
 // createSecureTempFile creates a temp file with restricted permissions
