@@ -23,10 +23,10 @@ type Model struct {
 	config    *config.Config
 	clipboard *util.ClipboardManager
 
-	searchInput textinput.Model
-	ready       bool
-	quitting    bool
-	refreshing  bool
+	searchInput   textinput.Model
+	ready         bool
+	quitting      bool
+	refreshing    bool
 	refreshCancel context.CancelFunc
 }
 
@@ -83,9 +83,10 @@ func (m Model) checkBackgroundRefresh() tea.Msg {
 		return backgroundRefreshStartMsg{}
 	}
 
-	// Check cache age
+	// The cache tracks never-refreshed and incomplete snapshots explicitly.
+	// Do not treat mutation-only entries with a zero refresh time as fresh.
 	cacheAge := m.cache.GetAge()
-	if cacheAge < m.config.BrowseRefreshCooldown {
+	if !m.cache.IsExpired() && cacheAge < m.config.BrowseRefreshCooldown {
 		// Cache is fresh, no refresh needed
 		return nil
 	}
@@ -431,7 +432,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, waitForProgress(msg.ch)
 
 	case backgroundRefreshCompleteMsg:
-		if m.refreshCancel != nil { m.refreshCancel(); m.refreshCancel = nil }
+		if m.refreshCancel != nil {
+			m.refreshCancel()
+			m.refreshCancel = nil
+		}
 		m.refreshing = false
 		if msg.err != nil {
 			if len(m.state.Entries) > 0 {
@@ -606,9 +610,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		// Remove from cache
-		if err := m.cache.Delete(msg.source); err != nil { msg.warning = "remote move succeeded but cache delete failed: " + err.Error() }
+		if err := m.cache.Delete(msg.source); err != nil {
+			msg.warning = "remote move succeeded but cache delete failed: " + err.Error()
+		}
 		if msg.destination != nil {
-			if err := m.cache.Update(cache.CacheEntry{Name: msg.destination.Name, Type: msg.destination.Type, Version: msg.destination.Version, LastModifiedDate: msg.destination.LastModifiedDate, Tags: msg.destination.Tags, TagsComplete: true, TagsFetchedAt: time.Now()}); err != nil { msg.warning = "remote move succeeded but cache update failed: " + err.Error() }
+			if err := m.cache.Update(cache.CacheEntry{Name: msg.destination.Name, Type: msg.destination.Type, Version: msg.destination.Version, LastModifiedDate: msg.destination.LastModifiedDate, Tags: msg.destination.Tags, TagsComplete: true, TagsFetchedAt: time.Now()}); err != nil {
+				msg.warning = "remote move succeeded but cache update failed: " + err.Error()
+			}
 		}
 
 		// Reload entries from cache
@@ -629,7 +637,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		if msg.destination != nil {
-			if err := m.cache.Update(cache.CacheEntry{Name: msg.destination.Name, Type: msg.destination.Type, Version: msg.destination.Version, LastModifiedDate: msg.destination.LastModifiedDate, Tags: msg.destination.Tags, TagsComplete: true, TagsFetchedAt: time.Now()}); err != nil { msg.warning = "remote copy succeeded but cache update failed: " + err.Error() }
+			if err := m.cache.Update(cache.CacheEntry{Name: msg.destination.Name, Type: msg.destination.Type, Version: msg.destination.Version, LastModifiedDate: msg.destination.LastModifiedDate, Tags: msg.destination.Tags, TagsComplete: true, TagsFetchedAt: time.Now()}); err != nil {
+				msg.warning = "remote copy succeeded but cache update failed: " + err.Error()
+			}
 		}
 		// Reload entries from cache
 		status := fmt.Sprintf("Copied %s to %s", msg.source, msg.target)
@@ -681,6 +691,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if m.state.Entries[i].Name == msg.name {
 					m.state.Entries[i].Tags = msg.tags
 				}
+			}
+			if entry, ok := m.cache.Get(msg.name); ok {
+				entry.Tags, entry.TagsComplete, entry.TagsError, entry.TagsFetchedAt = msg.tags, true, "", time.Now()
+				if err := m.cache.Update(*entry); err != nil { m.state.ErrorMessage = "Tags updated remotely but cache update failed: " + err.Error() }
 			}
 			m.filterEntries()
 		}
@@ -781,7 +795,13 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.state.Mode = m.state.PreviousMode
 			return m, nil
 		}
-		if m.refreshCancel != nil { m.refreshCancel(); m.refreshCancel = nil }
+		if m.refreshCancel != nil {
+			m.refreshCancel()
+			m.refreshCancel = nil
+		}
+		if m.clipboard != nil {
+			_ = m.clipboard.Close()
+		}
 		m.quitting = true
 		return m, tea.Quit
 	}
@@ -1689,7 +1709,9 @@ func (m Model) editSecret(name string) tea.Cmd {
 			return editPreparedMsg{err: fmt.Errorf("failed to get parameter: %w", err)}
 		}
 		metadata, err := m.client.GetParameterMetadata(ctx, param.Name)
-		if err != nil { return editPreparedMsg{err: fmt.Errorf("failed to read parameter protection metadata: %w", err)} }
+		if err != nil {
+			return editPreparedMsg{err: fmt.Errorf("failed to read parameter protection metadata: %w", err)}
+		}
 		param.KMSKeyID, param.Description, param.Tier = metadata.KMSKeyID, metadata.Description, metadata.Tier
 		param.AllowedPattern, param.Policies, param.DataType = metadata.AllowedPattern, metadata.Policies, metadata.DataType
 
@@ -1746,7 +1768,10 @@ func (m Model) moveSecret(source, target string) tea.Cmd {
 		defer cancel()
 		result, err := m.client.Transfer(ctx, aws.TransferInput{Source: source, Destination: target, Move: true})
 		msg := moveCompleteMsg{source: source, target: target, destination: result.Destination, err: err}
-		if result.DestinationWritten && !result.SourceDeleted { msg.warning = "destination was created; source was retained: " + err.Error(); msg.err = nil }
+		if result.DestinationWritten && !result.SourceDeleted {
+			msg.warning = "destination was created; source was retained: " + err.Error()
+			msg.err = nil
+		}
 		return msg
 	}
 }

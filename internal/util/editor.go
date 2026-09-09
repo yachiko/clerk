@@ -41,10 +41,10 @@ func (e *Editor) Prepare(content, extension string) (*EditorSession, error) {
 		_ = e.secureDelete(path)
 		return nil, fmt.Errorf("no editor found: set $EDITOR environment variable")
 	}
-	parts := strings.Fields(editor)
-	if len(parts) == 0 {
+	parts, err := parseEditorCommand(editor)
+	if err != nil {
 		_ = e.secureDelete(path)
-		return nil, fmt.Errorf("empty editor command")
+		return nil, err
 	}
 	cmd := exec.Command(parts[0], append(parts[1:], path)...)
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
@@ -163,9 +163,9 @@ func (e *Editor) getEditor() string {
 
 // openEditor opens the editor and waits for it to close
 func (e *Editor) openEditor(editor, filePath string) error {
-	parts := strings.Fields(editor)
-	if len(parts) == 0 {
-		return fmt.Errorf("empty editor command")
+	parts, err := parseEditorCommand(editor)
+	if err != nil {
+		return err
 	}
 
 	cmdName := parts[0]
@@ -177,6 +177,58 @@ func (e *Editor) openEditor(editor, filePath string) error {
 	cmd.Stderr = os.Stderr
 
 	return cmd.Run()
+}
+
+// parseEditorCommand handles quoting for command paths and arguments while
+// deliberately avoiding a shell. Shell expansion would make $EDITOR input an
+// execution surface; this parser only recognizes quotes and backslash escapes.
+func parseEditorCommand(command string) ([]string, error) {
+	var args []string
+	var current strings.Builder
+	var quote rune
+	escaped := false
+	flush := func() {
+		if current.Len() > 0 {
+			args = append(args, current.String())
+			current.Reset()
+		}
+	}
+	for _, r := range command {
+		if escaped {
+			current.WriteRune(r)
+			escaped = false
+			continue
+		}
+		if r == '\\' && quote != '\'' {
+			escaped = true
+			continue
+		}
+		if quote != 0 {
+			if r == quote {
+				quote = 0
+			} else {
+				current.WriteRune(r)
+			}
+			continue
+		}
+		if r == '\'' || r == '"' {
+			quote = r
+			continue
+		}
+		if r == ' ' || r == '\t' {
+			flush()
+			continue
+		}
+		current.WriteRune(r)
+	}
+	if escaped || quote != 0 {
+		return nil, fmt.Errorf("invalid editor command: unmatched quote or escape")
+	}
+	flush()
+	if len(args) == 0 {
+		return nil, fmt.Errorf("empty editor command")
+	}
+	return args, nil
 }
 
 // GetEditorName returns the name of the editor that will be used

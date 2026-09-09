@@ -655,6 +655,8 @@ func (m Model) renderValuePanel(width, height int) string {
 		value := m.state.DescribeValue
 		if m.state.DescribeMasked {
 			value = util.MaskValue(value)
+		} else {
+			value = util.SanitizeTerminal(value)
 		}
 
 		// Split value into lines
@@ -681,6 +683,9 @@ func (m Model) renderValuePanel(width, height int) string {
 
 		// Render visible lines with wrapping or horizontal scrolling
 		contentWidth := width - 4
+		if contentWidth < 1 {
+			contentWidth = 1
+		}
 		for i := start; i < end; i++ {
 			line := valueLines[i]
 
