@@ -107,6 +107,25 @@ func runList(cmd *cobra.Command, args []string) error {
 	if !cacheMgr.IsExpired() {
 		entries = cacheMgr.Search(path)
 		if len(entries) > 0 {
+			if listShowTags {
+				for i := range entries {
+					if entries[i].TagsComplete && !entries[i].TagsFetchedAt.IsZero() && time.Since(entries[i].TagsFetchedAt) < 15*time.Minute {
+						continue
+					}
+					entries[i].TagsFetchedAt = time.Now()
+					tags, tagErr := client.GetParameterTags(ctx, entries[i].Name)
+					if tagErr != nil {
+						entries[i].TagsError = tagErr.Error()
+						entries[i].TagsComplete = false
+					} else {
+						entries[i].Tags = tags
+						entries[i].TagsError = ""
+						entries[i].TagsComplete = true
+					}
+					// A cache failure must not hide a successfully enriched list result.
+					_ = cacheMgr.Update(entries[i])
+				}
+			}
 			entries = cacheMgr.Sort(entries, sortBy)
 			return outputList(entries, sortBy, listShowTags)
 		}
@@ -186,6 +205,15 @@ func normalizeSortOption(sort string) string {
 func outputList(entries []cache.CacheEntry, sortBy string, showTagsArg ...bool) error {
 	showTags := len(showTagsArg) > 0 && showTagsArg[0]
 	if globalOpts.Output == "json" {
+		if !showTags {
+			entries = append([]cache.CacheEntry(nil), entries...)
+			for i := range entries {
+				entries[i].Tags = nil
+				entries[i].TagsFetchedAt = time.Time{}
+				entries[i].TagsComplete = false
+				entries[i].TagsError = ""
+			}
+		}
 		encoder := json.NewEncoder(os.Stdout)
 		encoder.SetIndent("", "  ")
 		return encoder.Encode(entries)

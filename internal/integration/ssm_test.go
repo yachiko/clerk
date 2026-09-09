@@ -36,7 +36,7 @@ var _ = Describe("clerk against moto", func() {
 
 			stdout, _, err = run30s(home, "get", "/test/integration/secret", "--value")
 			Expect(err).NotTo(HaveOccurred())
-			Expect(stdout).To(Equal("my-secret-value\n"))
+			Expect(stdout).To(Equal("my-secret-value"))
 		})
 
 		It("bumps the version on a second put", func() {
@@ -50,7 +50,7 @@ var _ = Describe("clerk against moto", func() {
 
 			stdout, _, err = run30s(home, "get", "/test/v/secret", "--value")
 			Expect(err).NotTo(HaveOccurred())
-			Expect(stdout).To(Equal("v2\n"))
+			Expect(stdout).To(Equal("v2"))
 		})
 
 		It("attaches tags and surfaces them in JSON output", func() {
@@ -79,13 +79,13 @@ var _ = Describe("clerk against moto", func() {
 		It("returns the requested version when @N is given", func() {
 			stdout, _, err := run30s(home, "get", "/test/versions/secret@1", "--value")
 			Expect(err).NotTo(HaveOccurred())
-			Expect(stdout).To(Equal("version-1\n"))
+			Expect(stdout).To(Equal("version-1"))
 		})
 
 		It("returns the latest version when no @ is given", func() {
 			stdout, _, err := run30s(home, "get", "/test/versions/secret", "--value")
 			Expect(err).NotTo(HaveOccurred())
-			Expect(stdout).To(Equal("version-2\n"))
+			Expect(stdout).To(Equal("version-2"))
 		})
 	})
 
@@ -182,7 +182,7 @@ var _ = Describe("clerk against moto", func() {
 			for _, name := range []string{"/test/cp/src", "/test/cp/dst"} {
 				out, _, err := run30s(home, "get", name, "--value")
 				Expect(err).NotTo(HaveOccurred())
-				Expect(out).To(Equal("the-value\n"))
+				Expect(out).To(Equal("the-value"))
 			}
 		})
 	})
@@ -198,7 +198,7 @@ var _ = Describe("clerk against moto", func() {
 
 			out, _, err := run30s(home, "get", "/test/mv/dst", "--value")
 			Expect(err).NotTo(HaveOccurred())
-			Expect(out).To(Equal("movee\n"))
+			Expect(out).To(Equal("movee"))
 
 			_, _, err = run30s(home, "get", "/test/mv/src")
 			Expect(err).To(HaveOccurred(), "source must be gone after mv")

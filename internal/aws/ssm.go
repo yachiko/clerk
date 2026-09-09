@@ -127,7 +127,9 @@ func (c *Client) GetParameterMetadata(ctx context.Context, name string) (*Parame
 func encodePolicyTexts(policies []types.ParameterInlinePolicy) (string, error) {
 	policyTexts := make([]json.RawMessage, 0, len(policies))
 	for _, policy := range policies {
-		if policy.PolicyText == nil || *policy.PolicyText == "" { continue }
+		if policy.PolicyText == nil || *policy.PolicyText == "" {
+			continue
+		}
 		policyTexts = append(policyTexts, json.RawMessage(*policy.PolicyText))
 	}
 	encoded, err := json.Marshal(policyTexts)
@@ -420,36 +422,6 @@ func (c *Client) ListParametersByPath(ctx context.Context, path string, recursiv
 			params = append(params, ParameterMetadata{Name: aws.ToString(p.Name), Type: string(p.Type), Version: p.Version, LastModifiedDate: aws.ToTime(p.LastModifiedDate)})
 		}
 	}
-	return params, nil
-}
-
-// listParametersWithFilter uses DescribeParameters with filters
-func (c *Client) listParametersWithFilter(ctx context.Context, pattern string) ([]ParameterMetadata, error) {
-	var params []ParameterMetadata
-
-	input := &ssm.DescribeParametersInput{}
-
-	paginator := ssm.NewDescribeParametersPaginator(c.ssm, input)
-
-	for paginator.HasMorePages() {
-		output, err := paginator.NextPage(ctx)
-		if err != nil {
-			return nil, fmt.Errorf("failed to describe parameters: %w", err)
-		}
-
-		for _, p := range output.Parameters {
-			name := aws.ToString(p.Name)
-			if ok, _ := parammatch.Match(pattern, name); ok {
-				params = append(params, ParameterMetadata{
-					Name:             name,
-					Type:             string(p.Type),
-					Version:          p.Version,
-					LastModifiedDate: aws.ToTime(p.LastModifiedDate),
-				})
-			}
-		}
-	}
-
 	return params, nil
 }
 

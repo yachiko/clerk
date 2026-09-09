@@ -52,6 +52,12 @@ func runMove(cmd *cobra.Command, args []string) error {
 
 	source := args[0]
 	destination := args[1]
+	if err := validateParameterIdentifier(source, false); err != nil {
+		return err
+	}
+	if err := validateParameterIdentifier(destination, false); err != nil {
+		return err
+	}
 
 	// Load config
 	cfgMgr, err := config.NewManager()

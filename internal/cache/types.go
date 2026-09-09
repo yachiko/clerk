@@ -16,7 +16,7 @@ type CacheEntry struct {
 	LastModifiedDate time.Time             `json:"last_modified_date"`
 	Tags             map[string]string     `json:"tags,omitempty"`
 	TagsFetchedAt    time.Time             `json:"tags_fetched_at,omitempty"`
-	TagsComplete     bool                  `json:"tags_complete"`
+	TagsComplete     bool                  `json:"tags_complete,omitempty"`
 	TagsError        string                `json:"tags_error,omitempty"`
 	VersionHistory   []VersionHistoryEntry `json:"version_history,omitempty"`
 }

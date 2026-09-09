@@ -36,7 +36,11 @@ func NewManager(cfg *config.Config, region, accountID string) (*Manager, error) 
 	}
 	p := filepath.Join(home, ".clerk", "cache", accountID, region+".json")
 	m := &Manager{cachePath: p, ttl: cfg.CacheTTL, lockFile: p + ".lock", region: region, accountID: accountID, data: &CacheData{Entries: []CacheEntry{}}, changes: map[string]*CacheEntry{}}
-	_ = m.load() // corrupt caches are cache misses
+	if err := m.load(); err != nil && !os.IsNotExist(err) {
+		// A malformed cache must not prevent an AWS-backed command, but retain a
+		// diagnostic in memory so callers do not mistake it for a clean miss.
+		m.data.LastRefreshError = "cache ignored: " + err.Error()
+	}
 	return m, nil
 }
 
@@ -110,7 +114,7 @@ func (m *Manager) withDiskLock(fn func(*CacheData) error) error {
 		return err
 	}
 	tmp := f.Name()
-	defer os.Remove(tmp)
+	defer func() { _ = os.Remove(tmp) }()
 	if err = f.Chmod(0600); err == nil {
 		_, err = f.Write(b)
 	}
@@ -244,23 +248,37 @@ func (m *Manager) Delete(name string) error {
 
 type RefreshProgressCallback func(current, total int)
 
-func (m *Manager) Refresh(ctx context.Context, client *aws.Client, region string, parallel int, cb RefreshProgressCallback) error {
+type RefreshClient interface {
+	DescribeParametersStream(context.Context, chan<- aws.ParameterMetadata) (aws.DescribeResult, error)
+	GetParameterTags(context.Context, string) (map[string]string, error)
+}
+
+func (m *Manager) Refresh(ctx context.Context, client RefreshClient, region string, parallel int, cb RefreshProgressCallback) error {
 	m.refreshMu.Lock()
 	defer m.refreshMu.Unlock()
 	if parallel < 1 {
 		parallel = 1
 	}
-	m.mu.RLock()
+	m.mu.Lock()
 	old := cloneData(m.data)
-	m.mu.RUnlock()
+	// Changes made before a refresh are already represented in old. Only
+	// changes after this point need rebasing over the incoming snapshot.
+	m.changes = map[string]*CacheEntry{}
+	m.mu.Unlock()
 	prior := map[string]CacheEntry{}
 	for _, e := range old.Entries {
 		prior[e.Name] = e
 	}
 	ch := make(chan aws.ParameterMetadata, 100)
-	var result aws.DescribeResult
-	var streamErr error
-	go func() { result, streamErr = client.DescribeParametersStream(ctx, ch) }()
+	type streamResult struct {
+		result aws.DescribeResult
+		err    error
+	}
+	streamDone := make(chan streamResult, 1)
+	go func() {
+		result, err := client.DescribeParametersStream(ctx, ch)
+		streamDone <- streamResult{result: result, err: err}
+	}()
 	var es []CacheEntry
 	var esMu sync.Mutex
 	var wg sync.WaitGroup
@@ -303,15 +321,16 @@ func (m *Manager) Refresh(ctx context.Context, client *aws.Client, region string
 		}()
 	}
 	wg.Wait()
-	if streamErr != nil {
-		return streamErr
+	stream := <-streamDone
+	if stream.err != nil {
+		return stream.err
 	}
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}
 	return m.withDiskLock(func(d *CacheData) error {
-		next := &CacheData{LastRefresh: time.Now(), Region: region, Incomplete: !result.Complete, Entries: es}
-		if !result.Complete {
+		next := &CacheData{LastRefresh: time.Now(), Region: region, Incomplete: !stream.result.Complete, Entries: es}
+		if !stream.result.Complete {
 			for _, e := range d.Entries {
 				found := false
 				for _, seen := range es {

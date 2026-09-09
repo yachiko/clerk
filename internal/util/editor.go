@@ -161,24 +161,6 @@ func (e *Editor) getEditor() string {
 	}
 }
 
-// openEditor opens the editor and waits for it to close
-func (e *Editor) openEditor(editor, filePath string) error {
-	parts, err := parseEditorCommand(editor)
-	if err != nil {
-		return err
-	}
-
-	cmdName := parts[0]
-	args := append(parts[1:], filePath)
-
-	cmd := exec.Command(cmdName, args...)
-	cmd.Stdin = os.Stdin
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-
-	return cmd.Run()
-}
-
 // parseEditorCommand handles quoting for command paths and arguments while
 // deliberately avoiding a shell. Shell expansion would make $EDITOR input an
 // execution surface; this parser only recognizes quotes and backslash escapes.

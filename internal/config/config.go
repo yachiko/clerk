@@ -78,7 +78,7 @@ func (m *Manager) Save() error {
 		return fmt.Errorf("failed to create temporary config: %w", err)
 	}
 	tmpName := tmp.Name()
-	defer os.Remove(tmpName)
+	defer func() { _ = os.Remove(tmpName) }()
 	if err := tmp.Chmod(0600); err != nil {
 		_ = tmp.Close()
 		return fmt.Errorf("failed to secure temporary config: %w", err)

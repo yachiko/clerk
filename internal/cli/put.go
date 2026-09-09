@@ -122,7 +122,11 @@ func runPut(cmd *cobra.Command, args []string) error {
 	}
 	kmsKeyID := putKMSKeyID
 	if kmsKeyID == "" && existing != nil && paramType == "SecureString" {
-		kmsKeyID = existing.KMSKeyID
+		metadata, metadataErr := client.GetParameterMetadata(ctx, existing.Name)
+		if metadataErr != nil {
+			return fmt.Errorf("failed to read existing encryption metadata: %w", metadataErr)
+		}
+		kmsKeyID = metadata.KMSKeyID
 	}
 
 	// Prepare input

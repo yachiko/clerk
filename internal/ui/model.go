@@ -694,7 +694,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			if entry, ok := m.cache.Get(msg.name); ok {
 				entry.Tags, entry.TagsComplete, entry.TagsError, entry.TagsFetchedAt = msg.tags, true, "", time.Now()
-				if err := m.cache.Update(*entry); err != nil { m.state.ErrorMessage = "Tags updated remotely but cache update failed: " + err.Error() }
+				if err := m.cache.Update(*entry); err != nil {
+					m.state.ErrorMessage = "Tags updated remotely but cache update failed: " + err.Error()
+				}
 			}
 			m.filterEntries()
 		}

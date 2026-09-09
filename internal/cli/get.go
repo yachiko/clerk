@@ -126,6 +126,14 @@ func runGet(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("failed to get parameter: %w", err)
 		}
 	}
+	// Detail output includes tags when they are readable. Keep raw --value
+	// deliberately narrow so scripts do not acquire an unnecessary tag
+	// permission or extra request.
+	if !getValueOnly {
+		if tags, tagErr := client.GetParameterTags(ctx, param.Name); tagErr == nil {
+			param.Tags = tags
+		}
+	}
 
 	// Handle value masking
 	displayValue := param.Value
