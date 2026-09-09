@@ -54,11 +54,12 @@ func (cm *ClipboardManager) Copy(text string) error {
 	cm.owned = text
 	generation := cm.generation
 	if cm.clearTimeout > 0 {
+		timer := cm.after(cm.clearTimeout)
 		ctx, cancel := context.WithCancel(context.Background())
 		cm.cancelFunc = cancel
 		go func() {
 			select {
-			case <-cm.after(cm.clearTimeout):
+			case <-timer:
 				_ = cm.clearOwned(generation)
 			case <-ctx.Done():
 			}
