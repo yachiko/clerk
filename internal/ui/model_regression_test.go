@@ -165,20 +165,23 @@ func TestDetailResourceInfoFollowsScopeTitleAndFitsWidth(t *testing.T) {
 
 	for _, test := range views {
 		lines := strings.Split(test.view, "\n")
-		if len(lines) < 2 {
-			t.Fatalf("%s detail has fewer than two lines", test.name)
+		if len(lines) < 3 {
+			t.Fatalf("%s detail has fewer than three lines", test.name)
 		}
 		if !strings.HasPrefix(lines[0], "  Clerk |") {
 			t.Errorf("%s scope title is not indented on line 1: %q", test.name, lines[0])
 		}
-		if strings.TrimSpace(lines[1]) == "" {
-			t.Errorf("%s resource info is not on line 2: %q", test.name, lines[1])
+		if strings.TrimSpace(lines[1]) != "" {
+			t.Errorf("%s detail lacks spacer after title: %q", test.name, lines[1])
 		}
-		if !strings.HasSuffix(lines[1], "  ") {
-			t.Errorf("%s resource info lacks two trailing spaces: %q", test.name, lines[1])
+		if strings.TrimSpace(lines[2]) == "" {
+			t.Errorf("%s resource info is not on line 3: %q", test.name, lines[2])
 		}
-		if got := lipgloss.Width(lines[1]); got > test.width {
-			t.Errorf("%s resource info width=%d, want <= %d: %q", test.name, got, test.width, lines[1])
+		if !strings.HasSuffix(lines[2], "  ") {
+			t.Errorf("%s resource info lacks two trailing spaces: %q", test.name, lines[2])
+		}
+		if got := lipgloss.Width(lines[2]); got > test.width {
+			t.Errorf("%s resource info width=%d, want <= %d: %q", test.name, got, test.width, lines[2])
 		}
 	}
 }
@@ -281,11 +284,56 @@ func TestSecretsDetailRendererMatchesSSMGeometryAndHelp(t *testing.T) {
 	if len(lines) != m.height {
 		t.Fatalf("detail lines=%d, want %d", len(lines), m.height)
 	}
-	if !strings.Contains(lines[3], "VERSION HISTORY") || !strings.Contains(lines[3], "VALUE (binary, base64) (masked)") {
-		t.Fatalf("panel headings do not share SSM placement: %q", lines[3])
+	if !strings.Contains(lines[4], "VERSION HISTORY") || !strings.Contains(lines[4], "VALUE (binary, base64) (masked)") {
+		t.Fatalf("panel headings do not share SSM placement: %q", lines[4])
 	}
-	if !strings.Contains(lines[5], "  v1 [CURRENT]") || !strings.Contains(lines[6], "▸ v2 [PREVIOUS]") {
-		t.Fatalf("version rows do not use SSM indentation/marker: %q / %q", lines[5], lines[6])
+	if !strings.Contains(lines[6], "  v1 [CURRENT]") || !strings.Contains(lines[7], "▸ v2 [PREVIOUS]") {
+		t.Fatalf("version rows do not use SSM indentation/marker: %q / %q", lines[6], lines[7])
+	}
+}
+
+func TestDetailRenderersKeepTitleSpacerAndFitNarrowTerminals(t *testing.T) {
+	id := resourceID(aws.BackendSSM, "/very-long-parameter-name")
+	entry := cache.CacheEntry{Identity: id, Name: id.CanonicalID, Type: "String"}
+	smID := resourceID(aws.BackendSecretsManager, "arn:very-long-secret-name")
+	for _, size := range [][2]int{{42, 14}, {20, 8}} {
+		ssm := Model{scope: id, state: State{Mode: ViewModeDescribe, Width: size[0], Height: size[1], DescribeEntry: &entry}}
+		sm := smTestModel(&fakeSecretsManager{}, cache.CacheEntry{Identity: smID, Name: "very-long-secret-name"})
+		sm.width, sm.height, sm.mode, sm.detailIdentity = size[0], size[1], smDetail, smID
+		for _, test := range []struct {
+			name string
+			view string
+		}{{"SSM", ssm.renderDescribeView()}, {"SM", sm.View()}} {
+			lines := strings.Split(test.view, "\n")
+			if len(lines) > size[1] || len(lines) < 2 || !strings.HasPrefix(lines[0], "  Clerk |") || strings.TrimSpace(lines[1]) != "" {
+				t.Errorf("%s %dx%d title/spacer or height invalid: %q", test.name, size[0], size[1], test.view)
+			}
+			for _, line := range lines {
+				if lipgloss.Width(line) > size[0] {
+					t.Errorf("%s %dx%d line width=%d: %q", test.name, size[0], size[1], lipgloss.Width(line), line)
+				}
+			}
+		}
+	}
+}
+
+func TestSecretsRefreshStatusExpiresOnlyForMatchingGeneration(t *testing.T) {
+	id := resourceID(aws.BackendSecretsManager, "arn:secret")
+	m := smTestModel(&fakeSecretsManager{}, cache.CacheEntry{Identity: id, Name: "secret"})
+	m.refreshGen = 1
+	m, cmd := updateSM(t, m, smRefreshMsg{generation: 1, entries: m.entries})
+	if cmd == nil || m.status != "Secrets Manager inventory refreshed: 1 secrets" {
+		t.Fatalf("refresh status was not scheduled: status=%q cmd=%v", m.status, cmd)
+	}
+	clear := cmd().(smClearMsg)
+	m, _ = updateSM(t, m, smCopyMsg{identity: id, generation: 0, message: "new status"})
+	m, _ = updateSM(t, m, clear)
+	if m.status != "new status" {
+		t.Fatalf("stale clear erased newer status: %q", m.status)
+	}
+	m, _ = updateSM(t, m, smClearMsg{generation: m.statusGen})
+	if m.status != "" || m.err != "" {
+		t.Fatalf("matching clear did not clear status: status=%q err=%q", m.status, m.err)
 	}
 }
 

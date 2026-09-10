@@ -449,7 +449,8 @@ func (m Model) renderDescribeView() string {
 
 	entry := m.state.DescribeEntry
 
-	output = append(output, renderScopeTitle(m.scope))
+	// Keep the shared title and its spacer pinned above all detail content.
+	output = append(output, dimStyle.Render(truncateString("  Clerk | account "+m.scope.AccountID+" | region "+m.scope.Region, max(0, m.state.Width))), "")
 
 	// Parameter info box (equivalent to header in browse view)
 	box := m.renderDescribeBox(entry)
@@ -458,35 +459,19 @@ func (m Model) renderDescribeView() string {
 	// Separator line (matching browse view structure)
 	output = append(output, "  "+separatorStyle.Render(strings.Repeat("─", max(0, m.state.Width-4))))
 
-	// Calculate panel dimensions
-	leftWidth := 35
-	rightWidth := m.state.Width - 43
-	if rightWidth < 40 {
-		rightWidth = 40
-	}
-
-	// Calculate available height for panels
-	panelHeight := m.state.Height - 7
-	if panelHeight < 10 {
-		panelHeight = 10
-	}
-
-	// Render left panel (version history)
-	leftPanel := m.renderVersionHistoryPanel(leftWidth, panelHeight)
-
-	// Render right panel (value)
-	rightPanel := m.renderValuePanel(rightWidth, panelHeight)
-
-	// Join panels horizontally
-	panels := lipgloss.JoinHorizontal(lipgloss.Top, leftPanel, rightPanel)
-	output = append(output, panels)
-
-	// Calculate how many lines we have so far to properly pad
-	linesUsed := 1 + strings.Count(box, "\n") + 1 + 1 + strings.Count(panels, "\n") + 1 + 1 + 1
-	// Pad to fill space (similar to browse view)
-	for linesUsed < m.state.Height {
-		output = append(output, "")
-		linesUsed++
+	// Reserve the footer, status, and help rows before sizing panels. This keeps
+	// the title visible instead of letting fixed panel minimums scroll it away.
+	panelHeight := max(0, m.state.Height-len(output)-3)
+	if panelHeight >= 4 {
+		leftWidth, rightWidth := 35, m.state.Width-43
+		if m.state.Width <= 79 {
+			available := max(2, m.state.Width-4)
+			leftWidth = min(35, available/2)
+			rightWidth = available - leftWidth
+		}
+		leftPanel := m.renderVersionHistoryPanel(leftWidth, panelHeight)
+		rightPanel := m.renderValuePanel(rightWidth, panelHeight)
+		output = append(output, lipgloss.JoinHorizontal(lipgloss.Top, leftPanel, rightPanel))
 	}
 
 	// Footer separator (matching browse view structure)
@@ -511,7 +496,7 @@ func (m Model) renderDescribeView() string {
 	output = append(output, statusLine)
 
 	// Help
-	help := "  " + m.renderDescribeHelp() + "  "
+	help := "  " + truncateString(m.renderDescribeHelp(), max(0, m.state.Width-4)) + "  "
 	output = append(output, help)
 
 	view := strings.Join(output, "\n")
@@ -569,12 +554,17 @@ func (m Model) renderVersionHistoryPanel(width, height int) string {
 			}
 
 			if i == m.state.HistoryIndex {
-				versionStr := historyVersionLabel(h) + " - " + h.Modified
+				versionStr := truncateString(historyVersionLabel(h)+" - "+h.Modified, max(0, width-2))
 				lines = append(lines, selectedStyle.Render("▸ "+versionStr))
 			} else {
-				vStr := histVersionStyle.Render(historyVersionLabel(h))
-				dStr := histDateStyle.Render(" - " + h.Modified)
-				lines = append(lines, "  "+vStr+dStr)
+				full := historyVersionLabel(h) + " - " + h.Modified
+				if lipgloss.Width(full) <= max(0, width-2) {
+					vStr := histVersionStyle.Render(historyVersionLabel(h))
+					dStr := histDateStyle.Render(" - " + h.Modified)
+					lines = append(lines, "  "+vStr+dStr)
+				} else {
+					lines = append(lines, "  "+histVersionStyle.Render(truncateString(full, max(0, width-2))))
+				}
 			}
 			linesUsed++
 
@@ -806,6 +796,11 @@ func min(a, b int) int {
 
 // renderDescribeBox renders the parameter info as a compact header line
 func (m Model) renderDescribeBox(entry *cache.CacheEntry) string {
+	if m.state.Width < 50 {
+		name := truncateString(entry.Name, max(0, m.state.Width-4))
+		return "  " + nameColStyle.Render(name) + "  "
+	}
+
 	showModified := m.state.Width >= 100
 	var nameWidth int
 

@@ -70,6 +70,7 @@ type SecretsManagerModel struct {
 	quitting   bool
 	refreshing bool
 	refreshGen uint64
+	statusGen  uint64
 
 	detailIdentity   aws.ResourceIdentity
 	detailGeneration uint64
@@ -128,7 +129,7 @@ type smCopyMsg struct {
 	message    string
 	err        error
 }
-type smClearMsg struct{}
+type smClearMsg struct{ generation uint64 }
 
 // NewSecretsManagerModel creates a Secrets Manager browser over exactly one cache.
 func NewSecretsManagerModel(client SecretsManagerBrowseClient, cacheMgr *cache.Manager, cfg *config.Config, scope aws.ResourceIdentity) SecretsManagerModel {
@@ -223,7 +224,7 @@ func (m SecretsManagerModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.refreshing = false
 		if msg.err != nil {
-			m.err = "Secrets Manager refresh failed: " + msg.err.Error()
+			m.setError("Secrets Manager refresh failed: " + msg.err.Error())
 			return m, nil
 		}
 		m.metadata = make(map[aws.ResourceIdentity]aws.SecretMetadata, len(msg.metadata))
@@ -232,15 +233,14 @@ func (m SecretsManagerModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.entries = msg.entries
 		m.filter()
-		m.status = fmt.Sprintf("Secrets Manager inventory refreshed: %d secrets", len(m.entries))
-		m.err = ""
+		return m, m.clearStatusAfter(m.setStatus(fmt.Sprintf("Secrets Manager inventory refreshed: %d secrets", len(m.entries))))
 	case smDetailMsg:
 		if !m.current(msg.identity, msg.generation) {
 			return m, nil
 		}
 		m.valueLoading = false
 		if msg.err != nil {
-			m.err = "Version metadata unavailable: " + msg.err.Error()
+			m.setError("Version metadata unavailable: " + msg.err.Error())
 			return m, nil
 		}
 		m.versions = msg.versions
@@ -251,7 +251,7 @@ func (m SecretsManagerModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.valueLoading = false
 		if msg.err != nil {
-			m.err = "Value unavailable: " + msg.err.Error()
+			m.setError("Value unavailable: " + msg.err.Error())
 			return m, nil
 		}
 		if msg.copy {
@@ -269,7 +269,7 @@ func (m SecretsManagerModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if msg.err != nil {
-			m.err = msg.err.Error()
+			m.setError(msg.err.Error())
 			return m, nil
 		}
 		return m, tea.ExecProcess(msg.session.Command(), func(runErr error) tea.Msg {
@@ -295,10 +295,10 @@ func (m SecretsManagerModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if msg.err != nil {
-			m.err = msg.action + " failed: " + msg.err.Error()
+			m.setError(msg.action + " failed: " + msg.err.Error())
 			return m, nil
 		}
-		m.status, m.err = msg.message, ""
+		m.setStatus(msg.message)
 		if msg.action == "delete" || msg.action == "restore" || msg.action == "create" {
 			m.mode = smList
 		}
@@ -309,12 +309,14 @@ func (m SecretsManagerModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if msg.err != nil {
-			m.err = "copy failed: " + msg.err.Error()
+			m.setError("copy failed: " + msg.err.Error())
 		} else {
-			m.status, m.err = msg.message, ""
+			m.setStatus(msg.message)
 		}
 	case smClearMsg:
-		m.status, m.err = "", ""
+		if msg.generation == m.statusGen {
+			m.status, m.err = "", ""
+		}
 	}
 	return m, nil
 }
@@ -715,7 +717,25 @@ func (m *SecretsManagerModel) filter() {
 func (m *SecretsManagerModel) startRefresh() {
 	m.refreshGen++
 	m.refreshing = true
+	m.statusGen++
 	m.status, m.err = "Refreshing Secrets Manager metadata...", ""
+}
+
+func (m *SecretsManagerModel) setStatus(status string) uint64 {
+	m.statusGen++
+	m.status, m.err = status, ""
+	return m.statusGen
+}
+
+func (m SecretsManagerModel) clearStatusAfter(generation uint64) tea.Cmd {
+	return tea.Tick(3*time.Second, func(time.Time) tea.Msg {
+		return smClearMsg{generation: generation}
+	})
+}
+
+func (m *SecretsManagerModel) setError(err string) {
+	m.statusGen++
+	m.status, m.err = "", err
 }
 
 func (m *SecretsManagerModel) moveSelection(delta int) {
@@ -900,7 +920,7 @@ func (m SecretsManagerModel) renderSMList() string {
 func (m SecretsManagerModel) renderSMDetail() string {
 	meta := m.metadata[m.detailIdentity]
 	title := fmt.Sprintf("  Clerk | account %s | region %s", m.scope.AccountID, m.scope.Region)
-	lines := []string{dimStyle.Render(truncateString(title, max(0, m.width)))}
+	lines := []string{dimStyle.Render(truncateString(title, max(0, m.width))), ""}
 	nameWidth := max(0, m.width-4)
 	modified := ""
 	if meta.LastChangedDate != nil {
@@ -939,9 +959,11 @@ func (m SecretsManagerModel) renderSMDetail() string {
 	}
 	// Header rows plus the separator, status, and help consume the remaining space.
 	panelHeight := max(0, m.height-len(lines)-3)
-	left := m.renderSMVersionsPanel(leftWidth, panelHeight)
-	right := m.renderSMValuePanel(rightWidth, panelHeight)
-	lines = append(lines, lipgloss.JoinHorizontal(lipgloss.Top, left, right))
+	if panelHeight >= 4 {
+		left := m.renderSMVersionsPanel(leftWidth, panelHeight)
+		right := m.renderSMValuePanel(rightWidth, panelHeight)
+		lines = append(lines, lipgloss.JoinHorizontal(lipgloss.Top, left, right))
+	}
 	lines = append(lines, "  "+separatorStyle.Render(strings.Repeat("─", max(0, m.width-4))))
 	lines = append(lines, m.smDetailStatus(), "  "+m.smDetailHelp()+"  ")
 	return strings.Join(lines, "\n")
