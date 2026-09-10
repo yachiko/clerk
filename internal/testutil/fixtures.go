@@ -6,11 +6,12 @@ import (
 	"math/rand"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
+	"github.com/aws/aws-sdk-go-v2/service/secretsmanager"
+	smtypes "github.com/aws/aws-sdk-go-v2/service/secretsmanager/types"
 	"github.com/aws/aws-sdk-go-v2/service/ssm"
 	"github.com/aws/aws-sdk-go-v2/service/ssm/types"
 )
@@ -25,6 +26,13 @@ type FixtureConfig struct {
 	SecretTypes   []string
 	// Parallel controls the upper bound on concurrent PutParameter calls.
 	Parallel int
+}
+
+// FixtureResult describes resources created by Populate.
+type FixtureResult struct {
+	Parameters []string
+	Secrets    []string
+	Warnings   []string
 }
 
 // DefaultFixtureConfig returns a sensible default fixture configuration.
@@ -42,16 +50,26 @@ func DefaultFixtureConfig() *FixtureConfig {
 
 // FixtureGenerator drives PutParameter calls against an SSM endpoint (usually moto).
 type FixtureGenerator struct {
-	client *ssm.Client
-	config *FixtureConfig
-	rng    *rand.Rand
-	rngMu  sync.Mutex
+	client  *ssm.Client
+	secrets *secretsmanager.Client
+	config  *FixtureConfig
+	rng     *rand.Rand
+	rngMu   sync.Mutex
 }
 
 // NewFixtureGenerator builds a generator pointed at cfg.Endpoint.
 func NewFixtureGenerator(cfg *FixtureConfig) (*FixtureGenerator, error) {
 	if cfg == nil {
 		cfg = DefaultFixtureConfig()
+	}
+	if cfg.NumParameters < 0 {
+		return nil, fmt.Errorf("NumParameters must not be negative")
+	}
+	if cfg.Endpoint == "" {
+		cfg.Endpoint = "http://localhost:5000"
+	}
+	if cfg.Region == "" {
+		cfg.Region = "us-east-1"
 	}
 	if cfg.Parallel <= 0 {
 		cfg.Parallel = 10
@@ -68,11 +86,15 @@ func NewFixtureGenerator(cfg *FixtureConfig) (*FixtureGenerator, error) {
 	client := ssm.NewFromConfig(awsCfg, func(o *ssm.Options) {
 		o.BaseEndpoint = aws.String(cfg.Endpoint)
 	})
+	secretsClient := secretsmanager.NewFromConfig(awsCfg, func(o *secretsmanager.Options) {
+		o.BaseEndpoint = aws.String(cfg.Endpoint)
+	})
 
 	return &FixtureGenerator{
-		client: client,
-		config: cfg,
-		rng:    rand.New(rand.NewSource(time.Now().UnixNano())),
+		client:  client,
+		secrets: secretsClient,
+		config:  cfg,
+		rng:     rand.New(rand.NewSource(1)),
 	}, nil
 }
 
@@ -82,13 +104,17 @@ func (g *FixtureGenerator) Client() *ssm.Client { return g.client }
 // GenerateParameters creates NumParameters random parameters in moto using
 // bounded concurrency. Returns the list of names actually created.
 func (g *FixtureGenerator) GenerateParameters(ctx context.Context) ([]string, error) {
-	names := make(chan string, g.config.NumParameters)
+	return g.generateParameters(ctx, g.config.NumParameters)
+}
+
+func (g *FixtureGenerator) generateParameters(ctx context.Context, count int) ([]string, error) {
+	names := make(chan string, count)
 	errCh := make(chan error, 1)
 
 	sem := make(chan struct{}, g.config.Parallel)
 	var wg sync.WaitGroup
 
-	for i := 0; i < g.config.NumParameters; i++ {
+	for i := 0; i < count; i++ {
 		wg.Add(1)
 		sem <- struct{}{}
 		go func() {
@@ -189,6 +215,86 @@ func (g *FixtureGenerator) GenerateSpecificParameters(ctx context.Context) ([]st
 		created = append(created, p.name)
 	}
 	return created, nil
+}
+
+type secretFixture struct {
+	name      string
+	value     string
+	binary    []byte
+	tags      map[string]string
+	versioned bool
+}
+
+func fixtureSecrets() []secretFixture {
+	return []secretFixture{
+		{name: "/dev/database/password", value: "secret-manager-dev-password", tags: map[string]string{"env": "dev", "team": "backend"}, versioned: true},
+		{name: "/test/plain/text", value: "plain secret text", tags: map[string]string{"kind": "text"}},
+		{name: "/test/json/unicode", value: `{"message":"こんにちは, café","emoji":"🔐","enabled":true}`, tags: map[string]string{"kind": "json", "encoding": "unicode"}},
+		{name: "/test/binary/certificate", binary: []byte{0x00, 0x01, 0x02, 0xfe, 0xff, 'f', 'i', 'x'}, tags: map[string]string{"kind": "binary"}},
+	}
+}
+
+// Populate creates the deterministic browsing corpus and NumParameters filler
+// parameters. Secret creation uses the same endpoint and credentials as SSM.
+func (g *FixtureGenerator) Populate(ctx context.Context) (FixtureResult, error) {
+	parameters, err := g.GenerateSpecificParameters(ctx)
+	if err != nil {
+		return FixtureResult{Parameters: parameters}, err
+	}
+	remaining := g.config.NumParameters - len(parameters)
+	if remaining < 0 {
+		remaining = 0
+	}
+	filler, err := g.generateParameters(ctx, remaining)
+	parameters = append(parameters, filler...)
+	if err != nil {
+		return FixtureResult{Parameters: parameters}, err
+	}
+
+	result := FixtureResult{Parameters: parameters}
+	for _, fixture := range fixtureSecrets() {
+		input := &secretsmanager.CreateSecretInput{Name: aws.String(fixture.name), Tags: secretTags(fixture.tags)}
+		if fixture.binary != nil {
+			input.SecretBinary = fixture.binary
+		} else {
+			input.SecretString = aws.String(fixture.value)
+		}
+		created, createErr := g.secrets.CreateSecret(ctx, input)
+		if createErr != nil {
+			return result, fmt.Errorf("CreateSecret %s: %w", fixture.name, createErr)
+		}
+		result.Secrets = append(result.Secrets, fixture.name)
+		if !fixture.versioned {
+			continue
+		}
+		version, versionErr := g.secrets.PutSecretValue(ctx, &secretsmanager.PutSecretValueInput{
+			SecretId:           aws.String(fixture.name),
+			ClientRequestToken: aws.String("fixture-version-2"),
+			SecretString:       aws.String(`{"password":"rotated-secret","version":2}`),
+			VersionStages:      []string{"AWSCURRENT", "fixture-rotated"},
+		})
+		if versionErr != nil {
+			result.Warnings = append(result.Warnings, fmt.Sprintf("%s: version creation unavailable: %v", fixture.name, versionErr))
+			continue
+		}
+		if created.VersionId != nil && version.VersionId != nil {
+			_, labelErr := g.secrets.UpdateSecretVersionStage(ctx, &secretsmanager.UpdateSecretVersionStageInput{
+				SecretId: aws.String(fixture.name), VersionStage: aws.String("fixture-initial"), MoveToVersionId: created.VersionId,
+			})
+			if labelErr != nil {
+				result.Warnings = append(result.Warnings, fmt.Sprintf("%s: custom staging label unavailable: %v", fixture.name, labelErr))
+			}
+		}
+	}
+	return result, nil
+}
+
+func secretTags(tags map[string]string) []smtypes.Tag {
+	result := make([]smtypes.Tag, 0, len(tags))
+	for key, value := range tags {
+		result = append(result, smtypes.Tag{Key: aws.String(key), Value: aws.String(value)})
+	}
+	return result
 }
 
 // CleanupParameters deletes the given parameters. Missing parameters are
