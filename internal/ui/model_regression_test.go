@@ -9,6 +9,7 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 	"github.com/yachiko/clerk/internal/aws"
 	"github.com/yachiko/clerk/internal/cache"
 	"github.com/yachiko/clerk/internal/config"
@@ -220,13 +221,6 @@ func TestSecretsRendererMatchesSSMShellAndKeepsSecretPanels(t *testing.T) {
 		t.Fatal("SM detail is missing its content and footer separators")
 	}
 
-	m.width, m.height = 42, 14
-	m.valueLoaded, m.masked = true, false
-	m.value = aws.NewTextValue(id, strings.Repeat("very-long-value ", 30))
-	narrow := m.View()
-	if got, want := strings.Count(narrow, "\n")+1, m.height+4; got != want {
-		t.Fatalf("narrow detail lines=%d, want SSM minimum-panel geometry %d", got, want)
-	}
 }
 
 func TestSecretsDetailRendererMatchesSSMGeometryAndHelp(t *testing.T) {
@@ -242,8 +236,8 @@ func TestSecretsDetailRendererMatchesSSMGeometryAndHelp(t *testing.T) {
 
 	detail := m.View()
 	lines := strings.Split(detail, "\n")
-	if len(lines) != m.height+1 { // SSM's padding calculation retains one extra line.
-		t.Fatalf("detail lines=%d, want %d", len(lines), m.height+1)
+	if len(lines) != m.height {
+		t.Fatalf("detail lines=%d, want %d", len(lines), m.height)
 	}
 	if !strings.Contains(lines[4], "VERSION HISTORY") || !strings.Contains(lines[4], "VALUE (binary, base64) (masked)") {
 		t.Fatalf("panel headings do not share SSM placement: %q", lines[4])
@@ -251,15 +245,32 @@ func TestSecretsDetailRendererMatchesSSMGeometryAndHelp(t *testing.T) {
 	if !strings.Contains(lines[6], "  v1 [CURRENT]") || !strings.Contains(lines[7], "▸ v2 [PREVIOUS]") {
 		t.Fatalf("version rows do not use SSM indentation/marker: %q / %q", lines[6], lines[7])
 	}
-	help := lines[len(lines)-1]
-	for _, label := range []string{"x:mask", "c:copy-val", "C:copy-name", "e:new-version", "tab/shift+tab:version", "g:AWSCURRENT", "T:add-tag", "D:del-tag", "Delete:lifecycle", "u:restore", "r:refresh", "esc:back", "q:quit"} {
-		if !strings.Contains(help, label) {
-			t.Fatalf("detail help missing %q: %q", label, help)
+}
+
+func TestSecretsDetailFitsTerminalAtAllWidths(t *testing.T) {
+	id := resourceID(aws.BackendSecretsManager, "arn:secret")
+	changed := time.Date(2026, time.January, 2, 3, 4, 0, 0, time.UTC)
+	for _, size := range [][2]int{{120, 25}, {80, 24}, {42, 14}} {
+		m := smTestModel(&fakeSecretsManager{}, cache.CacheEntry{Identity: id, Name: strings.Repeat("long-secret-name-", 10)})
+		m.width, m.height = size[0], size[1]
+		m.mode, m.detailIdentity = smDetail, id
+		m.metadata[id] = aws.SecretMetadata{Identity: id, Tags: map[string]string{"environment": "production"}, LastChangedDate: &changed}
+		m.versions = []aws.SecretVersion{{VersionID: strings.Repeat("version-", 12), VersionStages: []string{"AWSCURRENT"}, CreatedDate: &changed}}
+		m.valueLoaded, m.masked = true, false
+		m.value = aws.NewTextValue(id, strings.Repeat("very-long-value ", 30))
+
+		lines := strings.Split(m.View(), "\n")
+		if len(lines) > m.height {
+			t.Errorf("%dx%d detail uses %d rows", m.width, m.height, len(lines))
 		}
-	}
-	for _, pair := range [][2]string{{"x:mask", "c:copy-val"}, {"c:copy-val", "C:copy-name"}, {"C:copy-name", "e:new-version"}, {"e:new-version", "tab/shift+tab:version"}, {"tab/shift+tab:version", "g:AWSCURRENT"}, {"g:AWSCURRENT", "T:add-tag"}, {"r:refresh", "esc:back"}, {"esc:back", "q:quit"}} {
-		if strings.Index(help, pair[0]) >= strings.Index(help, pair[1]) {
-			t.Fatalf("detail help order %q before %q: %q", pair[0], pair[1], help)
+		for _, line := range lines {
+			if got := lipgloss.Width(line); got > m.width {
+				t.Errorf("%dx%d detail line width=%d: %q", m.width, m.height, got, line)
+			}
+		}
+		title, info, tags := strings.Index(m.View(), "Clerk"), strings.Index(m.View(), "long-secret"), strings.Index(m.View(), "Tags:")
+		if title < 0 || info < 0 || tags < 0 || title >= info || info >= tags {
+			t.Errorf("%dx%d title/info/tags order is invalid", m.width, m.height)
 		}
 	}
 }

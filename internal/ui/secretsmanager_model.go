@@ -899,8 +899,9 @@ func (m SecretsManagerModel) renderSMList() string {
 
 func (m SecretsManagerModel) renderSMDetail() string {
 	meta := m.metadata[m.detailIdentity]
-	lines := []string{renderScopeTitle(m.scope), ""}
-	nameWidth := max(12, m.width-35)
+	title := fmt.Sprintf("Clerk | account %s | region %s", m.scope.AccountID, m.scope.Region)
+	lines := []string{dimStyle.Render(truncateString(title, max(0, m.width))), ""}
+	nameWidth := max(0, m.width-2)
 	modified := ""
 	if meta.LastChangedDate != nil {
 		modified = meta.LastChangedDate.Format("2006-01-02 15:04")
@@ -908,6 +909,12 @@ func (m SecretsManagerModel) renderSMDetail() string {
 	rotation := "off"
 	if meta.RotationEnabled != nil && *meta.RotationEnabled {
 		rotation = "on"
+	}
+	if m.width >= 75 {
+		// Account for the indent, column gaps, rotation, tag count, and timestamp.
+		nameWidth = max(0, m.width-39)
+	} else if m.width >= 50 {
+		nameWidth = max(0, m.width-20)
 	}
 	info := "  " + nameColStyle.Render(fmt.Sprintf("%-*s", nameWidth, truncateString(m.detailName(), nameWidth)))
 	if m.width >= 50 {
@@ -918,48 +925,55 @@ func (m SecretsManagerModel) renderSMDetail() string {
 	}
 	lines = append(lines, info)
 	if len(meta.Tags) > 0 {
-		lines = append(lines, dimStyle.Render("  Tags: "+m.smTagsLine(meta.Tags, max(1, m.width-10))))
+		tags := "  Tags: " + m.smTagsLine(meta.Tags, max(0, m.width-8))
+		lines = append(lines, dimStyle.Render(truncateString(tags, max(0, m.width))))
 	}
 	lines = append(lines, "  "+separatorStyle.Render(strings.Repeat("─", max(0, m.width-4))))
 
-	leftWidth := 35
-	rightWidth := m.width - 43
-	if rightWidth < 40 {
-		rightWidth = 40
+	leftWidth, rightWidth := 35, m.width-43
+	if m.width <= 79 {
+		available := max(2, m.width-4)
+		leftWidth = min(35, available/2)
+		rightWidth = available - leftWidth
 	}
-	panelHeight := m.height - 8
-	if panelHeight < 10 {
-		panelHeight = 10
-	}
+	// Header rows plus the separator, status, and help consume the remaining space.
+	panelHeight := max(0, m.height-len(lines)-3)
 	left := m.renderSMVersionsPanel(leftWidth, panelHeight)
 	right := m.renderSMValuePanel(rightWidth, panelHeight)
 	lines = append(lines, lipgloss.JoinHorizontal(lipgloss.Top, left, right))
-	linesUsed := 1 + 1 + strings.Count(info, "\n") + 1 + 1 + strings.Count(lipgloss.JoinHorizontal(lipgloss.Top, left, right), "\n") + 1 + 1 + 1
-	if len(meta.Tags) > 0 {
-		linesUsed++
-	}
-	for linesUsed < m.height {
-		lines = append(lines, "")
-		linesUsed++
-	}
 	lines = append(lines, "  "+separatorStyle.Render(strings.Repeat("─", max(0, m.width-4))))
-	lines = append(lines, m.smStatus(), "  "+m.smDetailHelp()+"  ")
+	lines = append(lines, m.smDetailStatus(), "  "+m.smDetailHelp()+"  ")
 	return strings.Join(lines, "\n")
 }
 
 func (m SecretsManagerModel) smDetailHelp() string {
-	return renderHelp(
+	full := renderHelp(
 		"x", "mask", "c", "copy-val", "C", "copy-name", "e", "new-version",
 		"tab/shift+tab", "version", "g", "AWSCURRENT",
 		"T", "add-tag", "D", "del-tag", "Delete", "lifecycle", "u", "restore", "r", "refresh",
 		"esc", "back", "q", "quit",
 	)
+	compact := renderHelp(
+		"x", "mask", "c", "copy", "C", "name", "e", "new", "tab", "version", "g", "current",
+		"T", "add", "D", "del", "Delete", "life", "u", "restore", "r", "refresh", "esc", "back", "q", "quit",
+	)
+	narrow := renderHelp("x", "mask", "c", "copy", "e", "new-version", "tab", "version", "Delete", "lifecycle", "esc", "back", "q", "quit")
+	minimum := renderHelp("tab", "version", "esc", "back")
+	for _, help := range []string{full, compact, narrow, minimum} {
+		if lipgloss.Width(help)+4 <= m.width {
+			return help
+		}
+	}
+	return ""
 }
 
 func (m SecretsManagerModel) renderSMVersionsPanel(width, height int) string {
+	if height == 0 {
+		return ""
+	}
 	lines := []string{panelHeaderStyle.Render("VERSION HISTORY"), ""}
 	if len(m.versions) == 0 {
-		lines = append(lines, dimStyle.Render("No version metadata available"))
+		lines = append(lines, dimStyle.Render(truncateString("No version metadata available", max(1, width))))
 	} else {
 		maxLines := max(1, height-4)
 		linesUsed := 0
@@ -971,7 +985,7 @@ func (m SecretsManagerModel) renderSMVersionsPanel(width, height int) string {
 			if version.CreatedDate != nil {
 				date = version.CreatedDate.Format("2006-01-02 15:04")
 			}
-			line := fmt.Sprintf("%s [%s] %s", version.VersionID, strings.Join(version.VersionStages, ","), date)
+			line := truncateString(fmt.Sprintf("%s [%s] %s", version.VersionID, strings.Join(version.VersionStages, ","), date), max(1, width-2))
 			if i == m.versionIndex {
 				line = selectedStyle.Render("▸ " + line)
 			} else {
@@ -1002,6 +1016,9 @@ func (m SecretsManagerModel) smTagsLine(tags map[string]string, width int) strin
 }
 
 func (m SecretsManagerModel) renderSMValuePanel(width, height int) string {
+	if height == 0 {
+		return ""
+	}
 	contentWidth := max(1, width-4)
 	header := panelHeaderStyle.Render("VALUE")
 	if m.valueLoaded {
@@ -1013,6 +1030,9 @@ func (m SecretsManagerModel) renderSMValuePanel(width, height int) string {
 	}
 	if m.masked {
 		header += " " + dimStyle.Render("(masked)")
+	}
+	if lipgloss.Width(header) > width {
+		header = panelHeaderStyle.Render(truncateString("VALUE", max(1, width)))
 	}
 	lines := []string{header, ""}
 	if m.valueLoading {
@@ -1047,6 +1067,17 @@ func (m SecretsManagerModel) smStatus() string {
 		return statusStyle.Render("  ✓ " + m.status)
 	}
 	return dimStyle.Render(fmt.Sprintf("  %d/%d Secrets Manager secrets", len(m.filtered), len(m.entries)))
+}
+
+func (m SecretsManagerModel) smDetailStatus() string {
+	width := max(0, m.width)
+	if m.err != "" {
+		return errorStyle.Render(truncateString("  ✗ "+m.err, width))
+	}
+	if m.status != "" {
+		return statusStyle.Render(truncateString("  ✓ "+m.status, width))
+	}
+	return dimStyle.Render(truncateString(fmt.Sprintf("  %d/%d Secrets Manager secrets", len(m.filtered), len(m.entries)), width))
 }
 
 func (m SecretsManagerModel) renderSMPrompt() string {
