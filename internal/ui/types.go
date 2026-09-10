@@ -80,6 +80,7 @@ type State struct {
 	DescribeGeneration    uint64 // Invalidates results from an earlier detail request.
 	DescribeLoading       bool
 	DescribeValue         string
+	DescribeBinary        bool
 	DescribeMasked        bool
 	DescribeHistory       []HistoryEntry
 	HistoryIndex          int

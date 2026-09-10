@@ -102,6 +102,20 @@ var _ = Describe("parseNameVersionLabel", func() {
 	)
 })
 
+var _ = Describe("Secrets Manager safety", func() {
+	It("rejects write commands before AWS setup", func() {
+		previous := globalOpts.Backend
+		DeferCleanup(func() { globalOpts.Backend = previous })
+		globalOpts.Backend = "secretsmanager"
+		Expect(requireWritableBackend()).To(MatchError(ContainSubstring("read-only")))
+	})
+
+	It("rejects simultaneous Secrets Manager version selectors", func() {
+		Expect(validateSecretVersionSelectors("AWSCURRENT", "id")).To(MatchError(ContainSubstring("cannot be used together")))
+		Expect(validateSecretVersionSelectors("AWSCURRENT", "")).To(Succeed())
+	})
+})
+
 var _ = Describe("matchPath", func() {
 	DescribeTable("matches names against path patterns",
 		func(pattern, name string, want bool) {

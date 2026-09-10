@@ -101,6 +101,35 @@ var _ = Describe("clerk against moto", func() {
 		})
 	})
 
+	Describe("Secrets Manager backend", func() {
+		It("reads string and binary secrets without enabling writes", func() {
+			fixtures, err := testutil.NewSecretsManagerFixtureGenerator(&testutil.FixtureConfig{Endpoint: integrationCfg.MotoEndpoint, Region: integrationCfg.MotoRegion})
+			Expect(err).NotTo(HaveOccurred())
+			created, err := fixtures.GenerateSpecificSecrets(context.Background())
+			Expect(err).NotTo(HaveOccurred())
+			DeferCleanup(func() { _ = fixtures.CleanupSecrets(context.Background(), created) })
+
+			stdout, stderr, err := run30s(home, "get", "test-sm-string", "--backend", "secretsmanager", "--value")
+			Expect(err).NotTo(HaveOccurred(), "stderr: %s", stderr)
+			Expect(stdout).To(Equal("secret-manager-value"))
+
+			stdout, stderr, err = run30s(home, "get", "test-sm-binary", "--backend", "secretsmanager", "--value")
+			Expect(err).NotTo(HaveOccurred(), "stderr: %s", stderr)
+			Expect(stdout).To(Equal("AAECAw=="))
+
+			stdout, stderr, err = run30s(home, "list", "--backend", "secretsmanager")
+			Expect(err).NotTo(HaveOccurred(), "stderr: %s", stderr)
+			Expect(stdout).To(ContainSubstring("test-sm-string"))
+
+			stdout, stderr, err = run30s(home, "refresh", "--backend", "secretsmanager")
+			Expect(err).NotTo(HaveOccurred(), "stderr: %s", stderr)
+			Expect(stdout).To(ContainSubstring("refreshed"))
+
+			_, _, err = run30s(home, "put", "test-sm-new", "value", "--backend", "secretsmanager")
+			Expect(err).To(HaveOccurred())
+		})
+	})
+
 	Describe("delete", func() {
 		It("removes the parameter and a subsequent get fails", func() {
 			_, _, err := run30s(home, "put", "/test/del/secret", "bye")

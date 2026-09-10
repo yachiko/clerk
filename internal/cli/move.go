@@ -48,6 +48,9 @@ Examples:
 }
 
 func runMove(cmd *cobra.Command, args []string) error {
+	if err := requireWritableBackend(); err != nil {
+		return err
+	}
 	ctx := context.Background()
 
 	source := args[0]
@@ -108,7 +111,7 @@ func runMove(cmd *cobra.Command, args []string) error {
 	}
 
 	// Update cache with region and account ID
-	cacheMgr, err := cache.NewManager(cfg, client.GetRegion(), client.GetAccountID())
+	cacheMgr, err := cache.NewManager(cfg, client.GetRegion(), client.GetAccountID(), client.GetBackend())
 
 	// Cache mutations are best-effort — the next refresh reconciles.
 	if err == nil {

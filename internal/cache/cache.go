@@ -29,12 +29,16 @@ type Manager struct {
 	changes           map[string]*CacheEntry
 }
 
-func NewManager(cfg *config.Config, region, accountID string) (*Manager, error) {
+func NewManager(cfg *config.Config, region, accountID string, backend ...string) (*Manager, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return nil, fmt.Errorf("failed to get home directory: %w", err)
 	}
-	p := filepath.Join(home, ".clerk", "cache", accountID, region+".json")
+	filename := region + ".json"
+	if len(backend) > 0 && backend[0] == "secretsmanager" {
+		filename = region + ".secretsmanager.json"
+	}
+	p := filepath.Join(home, ".clerk", "cache", accountID, filename)
 	m := &Manager{cachePath: p, ttl: cfg.CacheTTL, lockFile: p + ".lock", region: region, accountID: accountID, data: &CacheData{Entries: []CacheEntry{}}, changes: map[string]*CacheEntry{}}
 	if err := m.load(); err != nil && !os.IsNotExist(err) {
 		// A malformed cache must not prevent an AWS-backed command, but retain a

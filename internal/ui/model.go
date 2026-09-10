@@ -177,6 +177,7 @@ type describeLoadedMsg struct {
 	name       string
 	generation uint64
 	value      string
+	binary     bool
 	history    []HistoryEntry
 }
 
@@ -490,6 +491,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.state.DescribeValue = msg.value
+		m.state.DescribeBinary = msg.binary
 		m.state.DescribeHistory = msg.history
 		m.state.HistoryIndex = 0
 		m.state.DescribeLoading = false
@@ -792,6 +794,7 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.state.Mode == ViewModeDescribe {
 			m.state.DescribeGeneration++
 			m.state.DescribeValue = ""
+			m.state.DescribeBinary = false
 			m.state.DescribeHistory = nil
 			m.state.DescribeEntry = nil
 			m.state.Mode = m.state.PreviousMode
@@ -964,6 +967,7 @@ func (m Model) handleBrowseKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.state.DescribeParamName = paramName
 			m.state.DescribeLoading = true
 			m.state.DescribeValue = ""
+			m.state.DescribeBinary = false
 			m.state.DescribeHistory = nil
 			m.state.HistoryIndex = 0
 			m.state.HistoryScrollOffset = 0
@@ -1100,6 +1104,9 @@ func (m Model) handleDescribeKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case "c":
 		// Copy value
+		if m.state.DescribeBinary {
+			return m, func() tea.Msg { return errorMsg("SecretBinary values cannot be copied") }
+		}
 		if !m.state.DescribeLoading && m.state.DescribeValue != "" {
 			return m, m.copyValue(m.state.DescribeValue)
 		}
@@ -1639,7 +1646,7 @@ func (m Model) loadDescribe(name string, generation uint64) tea.Cmd {
 			if decrypt {
 				value = param.Value
 			}
-			return describeLoadedMsg{name: name, generation: generation, value: value, history: []HistoryEntry{{Version: param.Version, Value: value, Modified: param.LastModifiedDate.Format(time.RFC3339), ValueLoaded: decrypt}}}
+			return describeLoadedMsg{name: name, generation: generation, value: value, binary: param.Binary, history: []HistoryEntry{{Version: param.Version, Value: value, Modified: param.LastModifiedDate.Format(time.RFC3339), ValueLoaded: decrypt}}}
 		}
 		for _, h := range allVersions {
 			historyEntries = append(historyEntries, HistoryEntry{Version: h.Version, Modified: h.LastModifiedDate.Format(time.RFC3339), Labels: h.Labels})
@@ -1655,7 +1662,7 @@ func (m Model) loadDescribe(name string, generation uint64) tea.Cmd {
 			}
 		}
 		return describeLoadedMsg{name: name, generation: generation,
-			value:   param.Value,
+			value: param.Value, binary: param.Binary,
 			history: historyEntries,
 		}
 	}
@@ -1677,6 +1684,9 @@ func (m Model) copySecret(name string) tea.Cmd {
 				return errorMsg("Unable to retrieve secret value. Check your AWS credentials and network connection.")
 			}
 			return errorMsg("Failed to get secret: " + err.Error())
+		}
+		if param.Binary {
+			return errorMsg("SecretBinary values are displayed as base64 and cannot be copied")
 		}
 
 		msg, err := m.clipboard.CopyWithMessage(param.Value)
@@ -1709,6 +1719,9 @@ func (m Model) editSecret(name string) tea.Cmd {
 		param, err := m.client.GetParameter(ctx, name, true)
 		if err != nil {
 			return editPreparedMsg{err: fmt.Errorf("failed to get parameter: %w", err)}
+		}
+		if param.Binary {
+			return editPreparedMsg{err: fmt.Errorf("SecretBinary values cannot be opened in an editor")}
 		}
 		metadata, err := m.client.GetParameterMetadata(ctx, param.Name)
 		if err != nil {

@@ -13,6 +13,7 @@ type GlobalOptions struct {
 	Profile string
 	Output  string // "plain" or "json"
 	Verbose bool
+	Backend string
 }
 
 var globalOpts GlobalOptions
@@ -37,6 +38,7 @@ func NewRootCommand(version, commit, buildTime string) *cobra.Command {
 	rootCmd.PersistentFlags().StringVar(&globalOpts.Profile, "profile", "", "AWS profile to use")
 	rootCmd.PersistentFlags().StringVar(&globalOpts.Output, "output", "plain", "Output format (plain or json)")
 	rootCmd.PersistentFlags().BoolVar(&globalOpts.Verbose, "verbose", false, "Enable verbose output")
+	rootCmd.PersistentFlags().StringVar(&globalOpts.Backend, "backend", "ssm", "Secret backend (ssm or secretsmanager)")
 
 	// Initialize config commands
 	InitConfigCommands(rootCmd)

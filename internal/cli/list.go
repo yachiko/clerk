@@ -96,7 +96,7 @@ func runList(cmd *cobra.Command, args []string) error {
 	}
 
 	// Initialize cache with region and account ID
-	cacheMgr, err := cache.NewManager(cfg, client.GetRegion(), client.GetAccountID())
+	cacheMgr, err := cache.NewManager(cfg, client.GetRegion(), client.GetAccountID(), client.GetBackend())
 	if err != nil {
 		return fmt.Errorf("failed to initialize cache: %w", err)
 	}
