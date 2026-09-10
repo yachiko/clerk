@@ -741,7 +741,7 @@ func (m *SecretsManagerModel) adjustScroll() {
 	}
 }
 
-func (m SecretsManagerModel) visibleRows() int { return max(5, m.height-8) }
+func (m SecretsManagerModel) visibleRows() int { return max(5, m.height-7) }
 
 func (m SecretsManagerModel) selectedEntry() *cache.CacheEntry {
 	if m.selected < 0 || m.selected >= len(m.filtered) {
@@ -837,24 +837,32 @@ func (m SecretsManagerModel) View() string {
 }
 
 func (m SecretsManagerModel) renderSMList() string {
-	lines := []string{m.smTitle("SECRETS MANAGER")}
+	lines := []string{m.smTitle("LIST")}
 	if m.searching {
 		lines = append(lines, "  "+searchStyle.Render("/ ")+m.search.View())
 	} else if m.search.Value() != "" {
-		lines = append(lines, dimStyle.Render("  Filter: "+m.search.Value()))
+		lines = append(lines, dimStyle.Render("  Filter: "+m.search.Value()+" (/ to edit)"))
 	} else {
 		lines = append(lines, "")
 	}
-	showChanged := m.width >= 85
-	nameWidth := max(20, m.width-39)
-	if showChanged {
-		nameWidth = max(20, m.width-59)
+	showModified := m.width >= 100
+	showTags := m.width >= 110
+	nameWidth := m.width - 15 // indent + spacing + ROTATION
+	if showTags {
+		nameWidth -= 7
 	}
-	header := "  " + headerStyle.Render(fmt.Sprintf("%-*s   %-10s   %4s", nameWidth, "NAME", "ROTATION", "TAGS"))
-	if showChanged {
-		header += "   " + headerStyle.Render(fmt.Sprintf("%16s", "CHANGED"))
+	if showModified {
+		nameWidth -= 19
 	}
-	lines = append(lines, header, "  "+separatorStyle.Render(strings.Repeat("-", max(0, m.width-4))))
+	nameWidth = max(20, nameWidth)
+	header := "  " + headerStyle.Render(fmt.Sprintf("%-*s", nameWidth, "NAME")) + "   " + headerStyle.Render(fmt.Sprintf("%-8s", "ROTATION"))
+	if showTags {
+		header += "   " + headerStyle.Render(fmt.Sprintf("%4s", "TAGS"))
+	}
+	if showModified {
+		header += "   " + headerStyle.Render(fmt.Sprintf("%16s  ", "MODIFIED"))
+	}
+	lines = append(lines, header, "  "+separatorStyle.Render(strings.Repeat("─", max(0, m.width-4))))
 	end := min(len(m.filtered), m.scroll+m.visibleRows())
 	for i := m.scroll; i < end; i++ {
 		entry := m.filtered[i]
@@ -863,9 +871,15 @@ func (m SecretsManagerModel) renderSMList() string {
 		if meta.RotationEnabled != nil && *meta.RotationEnabled {
 			rotation = "on"
 		}
-		line := fmt.Sprintf("  %-*s   %-10s   %4d", nameWidth, truncateString(entry.Name, nameWidth), rotation, len(meta.Tags))
-		if showChanged {
-			line += fmt.Sprintf("   %16s", entry.LastModifiedDate.Format("2006-01-02 15:04"))
+		if meta.DeletedDate != nil {
+			rotation = "deleting"
+		}
+		line := fmt.Sprintf("  %-*s   %-8s", nameWidth, truncateString(entry.Name, nameWidth), rotation)
+		if showTags {
+			line += fmt.Sprintf("   %4s", tagCountStr(entry))
+		}
+		if showModified {
+			line += fmt.Sprintf("   %16s  ", entry.LastModifiedDate.Format("2006-01-02 15:04"))
 		}
 		if i == m.selected {
 			line = selectedStyle.Render(line)
@@ -875,17 +889,29 @@ func (m SecretsManagerModel) renderSMList() string {
 	if len(m.filtered) == 0 {
 		lines = append(lines, dimStyle.Render("    No Secrets Manager secrets found"))
 	}
-	for len(lines) < m.height-3 {
+	for len(lines) < m.height-2 {
 		lines = append(lines, "")
 	}
-	lines = append(lines, m.smStatus(), "  "+renderHelp("up/down", "navigate", "d/enter", "details", "n", "create", "e", "new-version", "T/D", "tags", "Delete", "lifecycle", "u", "restore", "c", "copy-value", "C", "copy-name", "r", "refresh", "/", "search", "q", "quit"))
+	lines = append(lines, "  "+separatorStyle.Render(strings.Repeat("─", max(0, m.width-4))))
+	lines = append(lines, m.smStatus(), "  "+renderHelp("↑↓", "navigate", "d", "details", "n", "create", "e", "new-version", "T/D", "tags", "Delete", "lifecycle", "u", "restore", "c", "copy-value", "C", "copy-name", "r", "refresh", "/", "search", "q", "quit")+"  ")
 	return strings.Join(lines, "\n")
 }
 
 func (m SecretsManagerModel) renderSMDetail() string {
 	meta := m.metadata[m.detailIdentity]
-	lines := []string{m.smTitle("SECRETS MANAGER DETAIL"), ""}
-	lines = append(lines, labelStyle.Render("  "+m.detailName()))
+	lines := []string{m.smTitle("DETAIL"), ""}
+	nameWidth := max(20, m.width-47)
+	modified := ""
+	if meta.LastChangedDate != nil {
+		modified = meta.LastChangedDate.Format("2006-01-02 15:04")
+	}
+	rotation := "off"
+	if meta.RotationEnabled != nil && *meta.RotationEnabled {
+		rotation = "on"
+	}
+	lines = append(lines, "  "+nameColStyle.Render(fmt.Sprintf("%-*s", nameWidth, truncateString(m.detailName(), nameWidth)))+"   "+typeColStyle.Render(fmt.Sprintf("%-8s", rotation))+"   "+tagColStyle.Render(fmt.Sprintf("%4d", len(meta.Tags)))+"   "+modifiedColStyle.Render(fmt.Sprintf("%16s  ", modified)))
+	lines = append(lines, "  "+separatorStyle.Render(strings.Repeat("─", max(0, m.width-4))))
+	lines = append(lines, panelHeaderStyle.Render("  METADATA"))
 	lines = append(lines, dimStyle.Render("  ARN: "+meta.ARN))
 	if meta.Description != "" {
 		lines = append(lines, "  Description: "+util.SanitizeTerminal(meta.Description))
@@ -974,10 +1000,11 @@ func (m SecretsManagerModel) renderSMDetail() string {
 		}
 		lines = append(lines, "  "+value)
 	}
-	for len(lines) < m.height-3 {
+	for len(lines) < m.height-2 {
 		lines = append(lines, "")
 	}
-	lines = append(lines, m.smStatus(), "  "+renderHelp("tab/j/k", "version", "g", "AWSCURRENT", "x", "reveal", "c", "copy-value", "C", "copy-name", "e", "new-version", "T/D", "tags", "Delete", "lifecycle", "u", "restore", "r", "refresh", "esc/q", "back"))
+	lines = append(lines, "  "+separatorStyle.Render(strings.Repeat("─", max(0, m.width-4))))
+	lines = append(lines, m.smStatus(), "  "+renderHelp("tab/shift+tab", "version", "g", "AWSCURRENT", "x", "reveal", "c", "copy-value", "C", "copy-name", "e", "new-version", "T/D", "tags", "Delete", "lifecycle", "u", "restore", "r", "refresh", "esc/q", "back")+"  ")
 	return strings.Join(lines, "\n")
 }
 
@@ -988,10 +1015,10 @@ func (m SecretsManagerModel) smTitle(name string) string {
 
 func (m SecretsManagerModel) smStatus() string {
 	if m.err != "" {
-		return errorStyle.Render("  " + m.err)
+		return errorStyle.Render("  ✗ " + m.err)
 	}
 	if m.status != "" {
-		return statusStyle.Render("  " + m.status)
+		return statusStyle.Render("  ✓ " + m.status)
 	}
 	return dimStyle.Render(fmt.Sprintf("  %d/%d Secrets Manager secrets", len(m.filtered), len(m.entries)))
 }

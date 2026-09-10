@@ -6,6 +6,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/yachiko/clerk/internal/aws"
@@ -141,7 +142,7 @@ func TestSecretsViewHasProviderRelevantActionsOnly(t *testing.T) {
 	id := resourceID(aws.BackendSecretsManager, "arn:secret")
 	m := smTestModel(&fakeSecretsManager{}, cache.CacheEntry{Identity: id, Name: "secret"})
 	view := m.View()
-	for _, expected := range []string{"ROTATION", "TAGS", "new-version", "lifecycle", "restore"} {
+	for _, expected := range []string{"CLERK - LIST", "account 123456789012", "region us-east-1", "ROTATION", "TAGS", "MODIFIED", "new-version", "lifecycle", "restore"} {
 		if !strings.Contains(view, expected) {
 			t.Fatalf("SM view missing %q", expected)
 		}
@@ -155,6 +156,31 @@ func TestSecretsViewHasProviderRelevantActionsOnly(t *testing.T) {
 	m, cmd := updateSM(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'m'}})
 	if cmd != nil || m.prompt.action != "" || m.status != before.status || m.err != before.err {
 		t.Fatal("unsupported move key entered an action path")
+	}
+}
+
+func TestSecretsRendererMatchesSSMShellAndKeepsSecretPanels(t *testing.T) {
+	id := resourceID(aws.BackendSecretsManager, "arn:secret")
+	changed := time.Date(2026, time.January, 2, 3, 4, 0, 0, time.UTC)
+	rotation := true
+	m := smTestModel(&fakeSecretsManager{}, cache.CacheEntry{Identity: id, Name: "secret", LastModifiedDate: changed, Tags: map[string]string{"env": "prod"}})
+	m.metadata[id] = aws.SecretMetadata{Identity: id, Name: "secret", ARN: id.CanonicalID, Tags: map[string]string{"env": "prod"}, LastChangedDate: &changed, RotationEnabled: &rotation}
+	m.search.SetValue("secret")
+	m.filter()
+
+	list := m.View()
+	for _, expected := range []string{"Filter: secret (/ to edit)", "────────────────", "1/1 Secrets Manager secrets", "↑↓:navigate"} {
+		if !strings.Contains(list, expected) {
+			t.Fatalf("SM list missing SSM shell signal %q", expected)
+		}
+	}
+
+	m.mode, m.detailIdentity = smDetail, id
+	detail := m.View()
+	for _, expected := range []string{"CLERK - DETAIL", "METADATA", "VERSIONS", "VALUE", "ARN: arn:secret", "new-version", "lifecycle"} {
+		if !strings.Contains(detail, expected) {
+			t.Fatalf("SM detail missing provider panel or action %q", expected)
+		}
 	}
 }
 
