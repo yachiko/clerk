@@ -29,13 +29,13 @@ destinations are refused unless --overwrite is explicitly provided.
 
 Examples:
   # Copy a secret
-  clerk cp "/dev/database-password" "/dev/database-password-backup"
+  clerk cp "/dev/database-password" "/dev/database-password-backup" --backend ssm
 
   # Copy with confirmation
-  clerk cp "/prod/api-key" "/prod/api-key-backup"
+  clerk cp "/prod/api-key" "/prod/api-key-backup" --backend ssm
 
   # Copy as JSON output
-  clerk cp "/dev/secret" "/dev/secret-copy" --output json`,
+  clerk cp "/dev/secret" "/dev/secret-copy" --output json --backend ssm`,
 		Args:    cobra.ExactArgs(2),
 		PreRunE: func(cmd *cobra.Command, _ []string) error { return requireExplicitSSM(cmd) },
 		RunE:    runCopy,

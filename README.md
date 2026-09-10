@@ -3,7 +3,7 @@
 </p>
 
 <h1 align="center">Clerk</h1>
-<p align="center"><strong>Tool for managing secrets in AWS Parameter Store with an interactive terminal UI</strong></p>
+<p align="center"><strong>Discover AWS Parameter Store and Secrets Manager values, with safe Parameter Store management</strong></p>
 
 <p align="center">
   <a href="https://github.com/yachiko/clerk/actions/workflows/ci.yml"><img src="https://github.com/yachiko/clerk/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
@@ -17,9 +17,9 @@
 ## Features
 
 - **Put**: Create or update secrets with tags and encryption
-- **Get**: Retrieve secrets with version support and masking
+- **Get**: Retrieve SSM parameters or Secrets Manager text/binary values with version support
 - **Delete**: Remove secrets with confirmation
-- **List**: List secrets with glob pattern filtering and sorting
+- **List**: Aggregate metadata from both backends with glob filtering and partial-result reporting
 - **Copy/Move**: Duplicate or relocate secrets
 - **Browse**: Interactive k9s-style terminal UI for exploring and managing secrets
 - **Cache**: Local caching for fast browsing and searching
@@ -69,10 +69,10 @@ clerk config set profile myprofile
 clerk config set region us-east-1
 
 # Create a secret
-clerk put "/dev/db_password" --stdin --tags "env=dev,team=backend" < ./db-password.txt
+clerk put "/dev/db_password" --stdin --tags "env=dev,team=backend" --backend ssm < ./db-password.txt
 
 # Get a secret
-clerk get "/dev/db_password"
+clerk get "/dev/db_password" --backend ssm
 
 # List secrets
 clerk list "/dev/*"
@@ -95,6 +95,10 @@ clerk browse
 | `mv`     | Move/rename a secret        | `clerk mv <src> <dst> [flags]`            |
 | `browse` | Interactive terminal UI     | `clerk browse [flags]`                    |
 | `refresh`| Refresh the local cache     | `clerk refresh [flags]`                   |
+
+`--backend` accepts `all`, `ssm`, or `secretsmanager`. `list` and `browse`
+default to `all`. Direct reads require one explicit backend, and current write,
+delete, copy, move, tag, and label operations require `--backend ssm`.
 
 ### Management Commands
 
@@ -195,19 +199,19 @@ unsupported. Automatic refresh is a startup freshness check, not a periodic moni
 
 ```bash
 # Create a simple string secret
-clerk put "/app/api_key" "sk_live_abc123"
+clerk put "/app/api_key" "sk_live_abc123" --backend ssm
 
 # Create from file content
-clerk put "/app/certificate" --file ./certs/cert.pem
+clerk put "/app/certificate" --file ./certs/cert.pem --backend ssm
 
 # Create with tags
-clerk put "/prod/db/password" "pass123" --tags "env=prod,team=backend,criticality=high"
+clerk put "/prod/db/password" "pass123" --tags "env=prod,team=backend,criticality=high" --backend ssm
 
 # Create as StringList
-clerk put "/app/allowed_hosts" "host1.com,host2.com,host3.com" --type StringList
+clerk put "/app/allowed_hosts" "host1.com,host2.com,host3.com" --type StringList --backend ssm
 
 # Create with specific KMS key
-clerk put "/secure/secret" "value" --kms-key-id alias/my-key
+clerk put "/secure/secret" "value" --kms-key-id alias/my-key --backend ssm
 ```
 
 Positional values are always literal, including text equal to an existing filename.
@@ -220,26 +224,33 @@ prefer file/stdin input to keep them out of shell history and process arguments.
 
 ```bash
 # Get latest version
-clerk get "/app/api_key"
+clerk get "/app/api_key" --backend ssm
 
 # Get specific version
-clerk get "/app/api_key@2"
+clerk get "/app/api_key@2" --backend ssm
 
 # Get masked value
-clerk get "/app/api_key" --mask
+clerk get "/app/api_key" --mask --backend ssm
 
 # Get only the value (for scripts)
-clerk get "/app/api_key" --value
+clerk get "/app/api_key" --value --backend ssm
 
 # Get as JSON
-clerk get "/app/api_key" --output json
+clerk get "/app/api_key" --output json --backend ssm
+
+# Get the current Secrets Manager text or base64-encoded binary value
+clerk get "app/api_key" --backend secretsmanager
+
+# Select a Secrets Manager stage or opaque version ID
+clerk get "app/api_key" --backend secretsmanager --stage AWSPREVIOUS
+clerk get "app/api_key" --backend secretsmanager --version-id VERSION_ID
 ```
 
-`get --value` emits raw bytes without adding a newline, allowing file/stdin
-round trips. Raw output can contain terminal controls; redirect it to a file or
-pipe when displaying untrusted values. Human detail output escapes unsafe controls;
-JSON uses JSON escaping. Masked values use a fixed mask without revealing length
-or fragments.
+SSM `get --value` emits its exact string without adding a newline. Secrets Manager
+binary values are base64 by default; `--raw --value` emits exact binary bytes.
+Raw output can contain terminal controls, so redirect it to a file or pipe. Human
+detail output escapes unsafe controls, JSON uses JSON escaping, and masked values
+use a fixed mask without revealing length or fragments.
 
 ### List and Filter
 
@@ -275,10 +286,10 @@ it cannot establish that those parameters have been deleted.
 
 ```bash
 # Copy secret to new location
-clerk cp "/dev/api_key" "/staging/api_key"
+clerk cp "/dev/api_key" "/staging/api_key" --backend ssm
 
 # Move (rename) secret
-clerk mv "/old/path/secret" "/new/path/secret"
+clerk mv "/old/path/secret" "/new/path/secret" --backend ssm
 ```
 
 Transfers create destinations by default. Use `--overwrite` to deliberately replace
@@ -323,7 +334,7 @@ source <(clerk completion bash)
 ## Requirements
 
 - AWS credentials configured (environment, config file, or IAM role)
-- Appropriate IAM permissions for SSM Parameter Store
+- Appropriate IAM permissions for each selected backend
 
 ### IAM policy examples
 
@@ -358,6 +369,30 @@ Inventory (`DescribeParameters` requires account-wide resource scope):
 Tag lookup is needed for enriched inventory and transfers. Plain metadata listing
 does not require it. `DescribeParameters` exposes metadata across the selected
 account and region; a parameter prefix in Clerk is a filter, not an IAM boundary.
+
+Secrets Manager metadata and value reader:
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": "secretsmanager:ListSecrets",
+      "Resource": "*"
+    },
+    {
+      "Effect": "Allow",
+      "Action": ["secretsmanager:ListSecretVersionIds", "secretsmanager:GetSecretValue"],
+      "Resource": "arn:aws:secretsmanager:eu-west-1:123456789012:secret:app/*"
+    }
+  ]
+}
+```
+
+Secrets encrypted with a customer-managed key also require `kms:Decrypt` as
+permitted by the key policy. `list` and initial TUI browsing use metadata APIs;
+values are requested only by `get`, reveal, or copy.
 
 Value reader (including explicit history access):
 

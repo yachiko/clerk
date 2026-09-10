@@ -37,19 +37,19 @@ Positional values are literal. Use --file or --stdin for exact bytes.
 
 Examples:
   # Create a secret with a string value
-  clerk put "/dev/db_password" "mypassword123"
+  clerk put "/dev/db_password" "mypassword123" --backend ssm
 
   # Create a secret from a file
-  clerk put "/dev/api_key" ./secrets/api_key.txt
+  clerk put "/dev/api_key" ./secrets/api_key.txt --backend ssm
 
   # Create with tags
-  clerk put "/dev/db_password" "mypassword123" --tags "env=dev,team=backend"
+  clerk put "/dev/db_password" "mypassword123" --tags "env=dev,team=backend" --backend ssm
 
   # Create as StringList
-  clerk put "/dev/allowed_ips" "10.0.0.1,10.0.0.2" --type StringList
+  clerk put "/dev/allowed_ips" "10.0.0.1,10.0.0.2" --type StringList --backend ssm
 
   # Create with custom KMS key
-  clerk put "/prod/secret" "value" --kms-key-id "alias/my-key"`,
+  clerk put "/prod/secret" "value" --kms-key-id "alias/my-key" --backend ssm`,
 		Args:    validatePutArgs,
 		PreRunE: func(cmd *cobra.Command, _ []string) error { return requireExplicitSSM(cmd) },
 		RunE:    runPut,

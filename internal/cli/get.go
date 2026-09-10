@@ -49,22 +49,25 @@ You can specify a version or label:
 
 Examples:
   # Get the latest version of a secret
-  clerk get "/dev/db_password"
+  clerk get "/dev/db_password" --backend ssm
 
   # Get a specific version
-  clerk get "/dev/db_password@2"
+  clerk get "/dev/db_password@2" --backend ssm
 
   # Get by label
-  clerk get "/dev/db_password:prod"
+  clerk get "/dev/db_password:prod" --backend ssm
 
   # Get with masked value
-  clerk get "/dev/db_password" --mask
+  clerk get "/dev/db_password" --mask --backend ssm
 
   # Get only the value (useful for scripts)
-  clerk get "/dev/db_password" --value
+  clerk get "/dev/db_password" --value --backend ssm
 
   # Get as JSON
-  clerk get "/dev/db_password" --output json`,
+  clerk get "/dev/db_password" --output json --backend ssm
+
+  # Get a Secrets Manager version
+  clerk get "dev/db_password" --backend secretsmanager --stage AWSCURRENT`,
 		Args:    cobra.ExactArgs(1),
 		PreRunE: validateGetFlags,
 		RunE:    runGet,

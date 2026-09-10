@@ -32,13 +32,13 @@ Requires confirmation unless --force is provided.
 
 Examples:
   # Move a secret (with confirmation)
-  clerk mv "/dev/database-password" "/dev/database-password-old"
+  clerk mv "/dev/database-password" "/dev/database-password-old" --backend ssm
 
   # Move without confirmation
-  clerk mv "/dev/api-key" "/dev/api-key-v2" --force
+  clerk mv "/dev/api-key" "/dev/api-key-v2" --force --backend ssm
 
   # Move as JSON output
-  clerk mv "/dev/secret" "/dev/secret-renamed" --output json --force`,
+  clerk mv "/dev/secret" "/dev/secret-renamed" --output json --force --backend ssm`,
 		Args:    cobra.ExactArgs(2),
 		PreRunE: func(cmd *cobra.Command, _ []string) error { return requireExplicitSSM(cmd) },
 		RunE:    runMove,

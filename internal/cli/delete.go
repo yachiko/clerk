@@ -35,13 +35,13 @@ version history will be permanently deleted.
 
 Examples:
   # Delete with confirmation prompt
-  clerk delete "/dev/old_secret"
+  clerk delete "/dev/old_secret" --backend ssm
 
   # Delete without confirmation
-  clerk delete "/dev/old_secret" --force
+  clerk delete "/dev/old_secret" --force --backend ssm
 
   # Delete and output JSON
-  clerk delete "/dev/old_secret" --force --output json`,
+  clerk delete "/dev/old_secret" --force --output json --backend ssm`,
 		Args:    cobra.ExactArgs(1),
 		PreRunE: func(cmd *cobra.Command, _ []string) error { return requireExplicitSSM(cmd) },
 		RunE:    runDelete,
