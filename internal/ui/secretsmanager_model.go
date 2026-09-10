@@ -899,9 +899,9 @@ func (m SecretsManagerModel) renderSMList() string {
 
 func (m SecretsManagerModel) renderSMDetail() string {
 	meta := m.metadata[m.detailIdentity]
-	title := fmt.Sprintf("Clerk | account %s | region %s", m.scope.AccountID, m.scope.Region)
-	lines := []string{dimStyle.Render(truncateString(title, max(0, m.width))), ""}
-	nameWidth := max(0, m.width-2)
+	title := fmt.Sprintf("  Clerk | account %s | region %s", m.scope.AccountID, m.scope.Region)
+	lines := []string{dimStyle.Render(truncateString(title, max(0, m.width)))}
+	nameWidth := max(0, m.width-4)
 	modified := ""
 	if meta.LastChangedDate != nil {
 		modified = meta.LastChangedDate.Format("2006-01-02 15:04")
@@ -912,9 +912,9 @@ func (m SecretsManagerModel) renderSMDetail() string {
 	}
 	if m.width >= 75 {
 		// Account for the indent, column gaps, rotation, tag count, and timestamp.
-		nameWidth = max(0, m.width-39)
+		nameWidth = max(0, m.width-41)
 	} else if m.width >= 50 {
-		nameWidth = max(0, m.width-20)
+		nameWidth = max(0, m.width-22)
 	}
 	info := "  " + nameColStyle.Render(fmt.Sprintf("%-*s", nameWidth, truncateString(m.detailName(), nameWidth)))
 	if m.width >= 50 {
@@ -923,6 +923,7 @@ func (m SecretsManagerModel) renderSMDetail() string {
 	if m.width >= 75 {
 		info += "   " + modifiedColStyle.Render(fmt.Sprintf("%16s", modified))
 	}
+	info += "  "
 	lines = append(lines, info)
 	if len(meta.Tags) > 0 {
 		tags := "  Tags: " + m.smTagsLine(meta.Tags, max(0, m.width-8))

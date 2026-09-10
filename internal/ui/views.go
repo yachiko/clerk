@@ -120,7 +120,7 @@ func renderHelp(pairs ...string) string {
 
 // renderScopeTitle provides a consistent, unobtrusive context line for resource views.
 func renderScopeTitle(scope aws.ResourceIdentity) string {
-	return dimStyle.Render(fmt.Sprintf("Clerk | account %s | region %s", scope.AccountID, scope.Region))
+	return dimStyle.Render(fmt.Sprintf("  Clerk | account %s | region %s", scope.AccountID, scope.Region))
 }
 
 // renderBrowseView renders the main browse view
@@ -451,9 +451,6 @@ func (m Model) renderDescribeView() string {
 
 	output = append(output, renderScopeTitle(m.scope))
 
-	// Empty line (equivalent to search bar in browse view for layout consistency)
-	output = append(output, "")
-
 	// Parameter info box (equivalent to header in browse view)
 	box := m.renderDescribeBox(entry)
 	output = append(output, box)
@@ -469,7 +466,7 @@ func (m Model) renderDescribeView() string {
 	}
 
 	// Calculate available height for panels
-	panelHeight := m.state.Height - 8
+	panelHeight := m.state.Height - 7
 	if panelHeight < 10 {
 		panelHeight = 10
 	}
@@ -485,7 +482,7 @@ func (m Model) renderDescribeView() string {
 	output = append(output, panels)
 
 	// Calculate how many lines we have so far to properly pad
-	linesUsed := 1 + 1 + strings.Count(box, "\n") + 1 + 1 + strings.Count(panels, "\n") + 1 + 1 + 1
+	linesUsed := 1 + strings.Count(box, "\n") + 1 + 1 + strings.Count(panels, "\n") + 1 + 1 + 1
 	// Pad to fill space (similar to browse view)
 	for linesUsed < m.state.Height {
 		output = append(output, "")
@@ -840,7 +837,7 @@ func (m Model) renderDescribeBox(entry *cache.CacheEntry) string {
 		return info
 	}
 
-	nameWidth = m.state.Width - 26 - 2
+	nameWidth = m.state.Width - 26 - 4
 	if nameWidth < 20 {
 		nameWidth = 20
 	}
@@ -851,7 +848,7 @@ func (m Model) renderDescribeBox(entry *cache.CacheEntry) string {
 	info := "  " +
 		nameColStyle.Render(fmt.Sprintf("%-*s", nameWidth, name)) + "   " +
 		typeColStyle.Render(fmt.Sprintf("%-12s", entryTypeLabel(*entry))) + "   " +
-		versionColStyle.Render(fmt.Sprintf("%8s", entryVersionLabel(*entry)))
+		versionColStyle.Render(fmt.Sprintf("%8s", entryVersionLabel(*entry))) + "  "
 
 	if len(entry.Tags) > 0 {
 		var tagPairs []string

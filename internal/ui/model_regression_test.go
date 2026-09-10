@@ -122,7 +122,7 @@ func TestSSMTreeNavigationAndNarrowRenderingAreSafe(t *testing.T) {
 
 func TestResourceViewsUseSharedScopeTitle(t *testing.T) {
 	scope := resourceID(aws.BackendSSM, "/secret")
-	title := "Clerk | account 123456789012 | region us-east-1"
+	title := "  Clerk | account 123456789012 | region us-east-1"
 	entry := cache.CacheEntry{Identity: scope, Name: "/secret", Type: "String"}
 	views := []string{
 		Model{scope: scope, state: State{Mode: ViewModeList, Width: 120, Height: 20}}.renderBrowseView(),
@@ -130,13 +130,55 @@ func TestResourceViewsUseSharedScopeTitle(t *testing.T) {
 		Model{scope: scope, state: State{Mode: ViewModeDescribe, Width: 120, Height: 20, DescribeEntry: &entry}}.renderDescribeView(),
 	}
 	for _, view := range views {
-		if !strings.Contains(view, title) {
-			t.Fatalf("view missing shared title %q", title)
+		if lines := strings.Split(view, "\n"); len(lines) == 0 || lines[0] != title {
+			t.Fatalf("shared title is not line 1: %q", view)
 		}
 		for _, legacy := range []string{"CLERK -", "DESCRIBE SSM", " LIST ", " TREE "} {
 			if strings.Contains(view, legacy) {
 				t.Fatalf("view contains legacy title text %q", legacy)
 			}
+		}
+	}
+}
+
+func TestDetailResourceInfoFollowsScopeTitleAndFitsWidth(t *testing.T) {
+	const width = 120
+	ssmID := resourceID(aws.BackendSSM, "/very-long-parameter-name")
+	ssmEntry := cache.CacheEntry{Identity: ssmID, Name: ssmID.CanonicalID, Type: "SecureString", Version: 7}
+	smID := resourceID(aws.BackendSecretsManager, "arn:very-long-secret-name")
+	sm := smTestModel(&fakeSecretsManager{}, cache.CacheEntry{Identity: smID, Name: "very-long-secret-name"})
+	sm.width, sm.height = width, 25
+	sm.mode, sm.detailIdentity = smDetail, smID
+
+	views := []struct {
+		name  string
+		width int
+		view  string
+	}{
+		{
+			name:  "SSM",
+			width: width,
+			view:  Model{scope: ssmID, state: State{Mode: ViewModeDescribe, Width: width, Height: 25, DescribeEntry: &ssmEntry}}.renderDescribeView(),
+		},
+		{name: "SM", width: width, view: sm.View()},
+	}
+
+	for _, test := range views {
+		lines := strings.Split(test.view, "\n")
+		if len(lines) < 2 {
+			t.Fatalf("%s detail has fewer than two lines", test.name)
+		}
+		if !strings.HasPrefix(lines[0], "  Clerk |") {
+			t.Errorf("%s scope title is not indented on line 1: %q", test.name, lines[0])
+		}
+		if strings.TrimSpace(lines[1]) == "" {
+			t.Errorf("%s resource info is not on line 2: %q", test.name, lines[1])
+		}
+		if !strings.HasSuffix(lines[1], "  ") {
+			t.Errorf("%s resource info lacks two trailing spaces: %q", test.name, lines[1])
+		}
+		if got := lipgloss.Width(lines[1]); got > test.width {
+			t.Errorf("%s resource info width=%d, want <= %d: %q", test.name, got, test.width, lines[1])
 		}
 	}
 }
@@ -239,11 +281,11 @@ func TestSecretsDetailRendererMatchesSSMGeometryAndHelp(t *testing.T) {
 	if len(lines) != m.height {
 		t.Fatalf("detail lines=%d, want %d", len(lines), m.height)
 	}
-	if !strings.Contains(lines[4], "VERSION HISTORY") || !strings.Contains(lines[4], "VALUE (binary, base64) (masked)") {
-		t.Fatalf("panel headings do not share SSM placement: %q", lines[4])
+	if !strings.Contains(lines[3], "VERSION HISTORY") || !strings.Contains(lines[3], "VALUE (binary, base64) (masked)") {
+		t.Fatalf("panel headings do not share SSM placement: %q", lines[3])
 	}
-	if !strings.Contains(lines[6], "  v1 [CURRENT]") || !strings.Contains(lines[7], "▸ v2 [PREVIOUS]") {
-		t.Fatalf("version rows do not use SSM indentation/marker: %q / %q", lines[6], lines[7])
+	if !strings.Contains(lines[5], "  v1 [CURRENT]") || !strings.Contains(lines[6], "▸ v2 [PREVIOUS]") {
+		t.Fatalf("version rows do not use SSM indentation/marker: %q / %q", lines[5], lines[6])
 	}
 }
 
