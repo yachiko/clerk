@@ -19,9 +19,10 @@ func InitRefreshCommand() *cobra.Command {
 	refreshCmd := &cobra.Command{
 		Use:   "refresh",
 		Short: "Refresh one backend's local metadata cache",
-		Long: `Refresh the local metadata cache for one explicitly selected backend.
+		Long: `Refresh the local metadata cache for one backend.
 
-Use --backend ssm or --backend secretsmanager. Secret values are never cached.
+The compatibility default is Parameter Store. Use --backend secretsmanager to
+refresh Secrets Manager metadata. Secret values are never cached.
 
 The refresh process uses parallel fetching to speed up the operation.
 
@@ -35,7 +36,7 @@ Examples:
   # Refresh with JSON output
   clerk refresh --output json`,
 		PreRunE: func(cmd *cobra.Command, _ []string) error {
-			_, err := requireConcreteBackend(cmd, "refresh", false)
+			_, err := refreshBackend(cmd)
 			return err
 		},
 		RunE: runRefresh,
@@ -54,7 +55,7 @@ func runRefresh(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to load config: %w", err)
 	}
 	cfg := cfgMgr.Get()
-	backend, err := requireConcreteBackend(cmd, "refresh", false)
+	backend, err := refreshBackend(cmd)
 	if err != nil {
 		return err
 	}
@@ -132,6 +133,13 @@ func runRefresh(cmd *cobra.Command, args []string) error {
 
 	// Output result
 	return outputRefreshResult(prevStats, newStats, duration)
+}
+
+func refreshBackend(cmd *cobra.Command) (aws.Backend, error) {
+	if !backendWasExplicit(cmd) {
+		return aws.BackendSSM, nil
+	}
+	return requireConcreteBackend(cmd, "refresh", false)
 }
 
 func outputRefreshResult(prev, current cache.CacheStats, duration time.Duration) error {

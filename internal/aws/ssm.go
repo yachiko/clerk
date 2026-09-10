@@ -112,7 +112,7 @@ func (c *Client) GetParameterMetadata(ctx context.Context, name string) (*Parame
 		if err != nil {
 			return nil, fmt.Errorf("failed to encode parameter policies: %w", err)
 		}
-		return &Parameter{Name: aws.ToString(p.Name), Type: string(p.Type), ARN: aws.ToString(p.ARN), DataType: aws.ToString(p.DataType), Description: aws.ToString(p.Description), KMSKeyID: aws.ToString(p.KeyId), Tier: string(p.Tier), AllowedPattern: aws.ToString(p.AllowedPattern), Policies: string(policies)}, nil
+		return &Parameter{Name: aws.ToString(p.Name), Type: string(p.Type), Version: p.Version, LastModifiedDate: aws.ToTime(p.LastModifiedDate), ARN: aws.ToString(p.ARN), DataType: aws.ToString(p.DataType), Description: aws.ToString(p.Description), KMSKeyID: aws.ToString(p.KeyId), Tier: string(p.Tier), AllowedPattern: aws.ToString(p.AllowedPattern), Policies: string(policies)}, nil
 	}
 	return nil, fmt.Errorf("parameter metadata not found: %s", name)
 }

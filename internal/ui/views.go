@@ -2,10 +2,12 @@ package ui
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
 	"github.com/charmbracelet/lipgloss"
+	"github.com/yachiko/clerk/internal/aws"
 	"github.com/yachiko/clerk/internal/cache"
 	"github.com/yachiko/clerk/internal/util"
 )
@@ -132,7 +134,7 @@ func (m Model) renderBrowseView() string {
 	if m.state.Mode == ViewModeTree {
 		mode = "TREE"
 	}
-	titleText := fmt.Sprintf(" CLERK - %s ", mode)
+	titleText := fmt.Sprintf(" CLERK - %s | account %s | region %s ", mode, m.scope.AccountID, m.scope.Region)
 	titlePad := m.state.Width - lipgloss.Width(titleText)
 	if titlePad < 0 {
 		titlePad = 0
@@ -144,6 +146,9 @@ func (m Model) renderBrowseView() string {
 	filterBadge := ""
 	if m.state.FilterType != FilterAll {
 		filterBadge = searchStyle.Render("[" + m.state.FilterType.String() + "]")
+	}
+	if m.state.BackendFilter != "" && m.state.BackendFilter != "all" {
+		filterBadge += searchStyle.Render("[backend: " + backendLabel(m.state.BackendFilter) + "]")
 	}
 
 	// Search bar (always visible, fixed at top)
@@ -214,7 +219,7 @@ func (m Model) renderBrowseView() string {
 		rowCount = len(m.state.TreeNodes)
 	}
 	if rowCount == 0 {
-		lines = append(lines, dimStyle.Render("    No parameters found"))
+		lines = append(lines, dimStyle.Render("    No SSM/SM resources found"))
 		// Pad with empty lines to fill space
 		for i := len(lines); i < m.state.Height-2; i++ {
 			lines = append(lines, "")
@@ -255,7 +260,7 @@ func (m Model) renderBrowseView() string {
 		statusLine = statusStyle.Render("  ✓ " + m.state.StatusMessage)
 	} else {
 		// Stats with offline mode indicator
-		stats := fmt.Sprintf("%d/%d parameters", len(m.state.FilteredItems), len(m.state.Entries))
+		stats := fmt.Sprintf("%d/%d SSM/SM resources", len(m.state.FilteredItems), len(m.state.Entries))
 
 		// Add offline mode indicator or cache age
 		if m.state.OfflineMode {
@@ -279,13 +284,13 @@ func (m Model) renderBrowseView() string {
 		help = "  " + renderHelp(
 			"↑↓", "navigate", "d", "describe", "e", "edit", "c", "copy",
 			"m", "move", "p", "copy-to", "space", "expand",
-			"s", "sort("+sortLabel+")", "S", "reverse", "f", "filter", "r", "refresh", "/", "search", "q", "quit",
+			"s", "sort("+sortLabel+")", "S", "reverse", "f", "type", "b", "backend", "r", "refresh", "/", "search", "q", "quit",
 		) + "  "
 	} else {
 		help = "  " + renderHelp(
 			"↑↓", "navigate", "d", "describe", "e", "edit", "c", "copy",
 			"m", "move", "p", "copy-to", "t", "tree",
-			"s", "sort("+sortLabel+")", "S", "reverse", "f", "filter", "r", "refresh", "/", "search", "q", "quit",
+			"s", "sort("+sortLabel+")", "S", "reverse", "f", "type", "b", "backend", "r", "refresh", "/", "search", "q", "quit",
 		) + "  "
 	}
 	lines = append(lines, help)
@@ -299,6 +304,20 @@ func tagCountStr(entry cache.CacheEntry) string {
 		return "-"
 	}
 	return fmt.Sprintf("%d", len(entry.Tags))
+}
+
+func entryTypeLabel(entry cache.CacheEntry) string {
+	if entry.Identity.Backend == aws.BackendSecretsManager || entry.Type == "" {
+		return "-"
+	}
+	return entry.Type
+}
+
+func entryVersionLabel(entry cache.CacheEntry) string {
+	if entry.Identity.Backend == aws.BackendSecretsManager {
+		return "-"
+	}
+	return fmt.Sprintf("%d", entry.Version)
 }
 
 // calcNameWidth computes the name column width based on visible columns
@@ -323,11 +342,11 @@ func (m Model) renderListItems(b *strings.Builder, start, end int, showModified,
 
 	for i := start; i < end; i++ {
 		entry := m.state.FilteredItems[i]
-		name := truncateString(entry.Name, nameWidth-2)
+		name := truncateString("["+backendLabel(entry.Identity.Backend)+"] "+entry.Name, nameWidth-2)
 
 		if i == m.state.SelectedIndex {
 			// Selected row: single highlight color across entire line
-			line := fmt.Sprintf("  %-*s   %-12s   %8d", nameWidth, name, entry.Type, entry.Version)
+			line := fmt.Sprintf("  %-*s   %-12s   %8s", nameWidth, name, entryTypeLabel(entry), entryVersionLabel(entry))
 			if showTags {
 				line += fmt.Sprintf("   %4s", tagCountStr(entry))
 			}
@@ -339,8 +358,8 @@ func (m Model) renderListItems(b *strings.Builder, start, end int, showModified,
 			// Non-selected row: per-column coloring
 			b.WriteString("  " +
 				nameColStyle.Render(fmt.Sprintf("%-*s", nameWidth, name)) + "   " +
-				typeColStyle.Render(fmt.Sprintf("%-12s", entry.Type)) + "   " +
-				versionColStyle.Render(fmt.Sprintf("%8d", entry.Version)))
+				typeColStyle.Render(fmt.Sprintf("%-12s", entryTypeLabel(entry))) + "   " +
+				versionColStyle.Render(fmt.Sprintf("%8s", entryVersionLabel(entry))))
 			if showTags {
 				b.WriteString("   " + tagColStyle.Render(fmt.Sprintf("%4s", tagCountStr(entry))))
 			}
@@ -396,8 +415,8 @@ func (m Model) renderTreeItems(b *strings.Builder, start, end int, showModified,
 				if availableWidth < 10 {
 					availableWidth = 10
 				}
-				name := truncateString(node.Name, availableWidth-2)
-				line = fmt.Sprintf("  %s%s%-*s   %-12s   %8d", indent, prefix, availableWidth, name, entry.Type, entry.Version)
+				name := truncateString("["+backendLabel(entry.Identity.Backend)+"] "+node.Name, availableWidth-2)
+				line = fmt.Sprintf("  %s%s%-*s   %-12s   %8s", indent, prefix, availableWidth, name, entryTypeLabel(*entry), entryVersionLabel(*entry))
 				if showTags {
 					line += fmt.Sprintf("   %4s", tagCountStr(*entry))
 				}
@@ -425,11 +444,11 @@ func (m Model) renderTreeItems(b *strings.Builder, start, end int, showModified,
 			if availableWidth < 10 {
 				availableWidth = 10
 			}
-			name := truncateString(node.Name, availableWidth-2)
+			name := truncateString("["+backendLabel(entry.Identity.Backend)+"] "+node.Name, availableWidth-2)
 			b.WriteString("  " + indent + prefix +
 				nameColStyle.Render(fmt.Sprintf("%-*s", availableWidth, name)) + "   " +
-				typeColStyle.Render(fmt.Sprintf("%-12s", entry.Type)) + "   " +
-				versionColStyle.Render(fmt.Sprintf("%8d", entry.Version)))
+				typeColStyle.Render(fmt.Sprintf("%-12s", entryTypeLabel(*entry))) + "   " +
+				versionColStyle.Render(fmt.Sprintf("%8s", entryVersionLabel(*entry))))
 			if showTags {
 				b.WriteString("   " + tagColStyle.Render(fmt.Sprintf("%4s", tagCountStr(*entry))))
 			}
@@ -453,7 +472,7 @@ func (m Model) renderDescribeView() string {
 	entry := m.state.DescribeEntry
 
 	// Title - full width
-	titleText := " DESCRIBE "
+	titleText := fmt.Sprintf(" DESCRIBE %s | account %s | region %s ", backendLabel(entry.Identity.Backend), m.scope.AccountID, m.scope.Region)
 	titlePad := m.state.Width - lipgloss.Width(titleText)
 	if titlePad < 0 {
 		titlePad = 0
@@ -554,7 +573,11 @@ func (m Model) renderVersionHistoryPanel(width, height int) string {
 	lines = append(lines, "")
 
 	if len(m.state.DescribeHistory) == 0 {
-		lines = append(lines, dimStyle.Render("Loading..."))
+		if m.state.DescribeLoading {
+			lines = append(lines, dimStyle.Render("Loading..."))
+		} else {
+			lines = append(lines, dimStyle.Render("No versions found"))
+		}
 	} else {
 		// Calculate how many lines fit in the panel
 		maxLines := height - 4
@@ -578,10 +601,10 @@ func (m Model) renderVersionHistoryPanel(width, height int) string {
 			}
 
 			if i == m.state.HistoryIndex {
-				versionStr := fmt.Sprintf("v%d - %s", h.Version, h.Modified)
+				versionStr := historyVersionLabel(h) + " - " + h.Modified
 				lines = append(lines, selectedStyle.Render("▸ "+versionStr))
 			} else {
-				vStr := histVersionStyle.Render(fmt.Sprintf("v%d", h.Version))
+				vStr := histVersionStyle.Render(historyVersionLabel(h))
 				dStr := histDateStyle.Render(" - " + h.Modified)
 				lines = append(lines, "  "+vStr+dStr)
 			}
@@ -618,12 +641,26 @@ func (m Model) renderVersionHistoryPanel(width, height int) string {
 	return panelStyle.Render(content)
 }
 
+func historyVersionLabel(entry HistoryEntry) string {
+	if entry.VersionID != "" {
+		return entry.VersionID
+	}
+	return fmt.Sprintf("v%d", entry.Version)
+}
+
 // renderValuePanel renders the value panel
 func (m Model) renderValuePanel(width, height int) string {
 	var lines []string
 
 	// Header with underline
-	header := panelHeaderStyle.Render("VALUE")
+	header := panelHeaderStyle.Render(backendLabel(m.state.DescribeIdentity.Backend) + " VALUE")
+	if m.state.DescribeValueKind != "" {
+		kind := string(m.state.DescribeValueKind)
+		if m.state.DescribeValueKind == aws.ValueBinary {
+			kind = "binary, base64"
+		}
+		header += " " + dimStyle.Render("("+kind+")")
+	}
 	if m.state.DescribeMasked {
 		header += " " + dimStyle.Render("(masked)")
 	}
@@ -640,7 +677,7 @@ func (m Model) renderValuePanel(width, height int) string {
 
 	lines = append(lines, "")
 
-	if m.state.DescribeValue == "" {
+	if m.state.DescribeValue == "" && m.state.DescribeValueKind == "" {
 		if m.state.OfflineMode && m.state.DescribeEntry != nil && m.state.DescribeEntry.Type == "SecureString" {
 			lines = append(lines, warningStyle.Render("SecureString - value not cached for security"))
 			lines = append(lines, "")
@@ -649,10 +686,23 @@ func (m Model) renderValuePanel(width, height int) string {
 		} else if m.state.OfflineMode {
 			lines = append(lines, warningStyle.Render("Value unavailable in offline mode"))
 		} else {
-			lines = append(lines, dimStyle.Render("Loading..."))
+			if m.state.DescribeLoading {
+				lines = append(lines, dimStyle.Render("Loading selected value..."))
+			} else if m.state.DescribeValueError != "" {
+				lines = append(lines, errorStyle.Render("Value unavailable; metadata remains visible"))
+			} else {
+				lines = append(lines, dimStyle.Render("Press x to reveal or c to copy"))
+			}
 		}
 	} else {
 		value := m.state.DescribeValue
+		if value == "" {
+			if m.state.DescribeValueKind == "binary" {
+				value = "[empty binary value; base64 is empty]"
+			} else {
+				value = "[empty text value]"
+			}
+		}
 		if m.state.DescribeMasked {
 			value = util.MaskValue(value)
 		} else {
@@ -796,7 +846,7 @@ func (m Model) renderDescribeBox(entry *cache.CacheEntry) string {
 		if nameWidth < 20 {
 			nameWidth = 20
 		}
-		name := entry.Name
+		name := "[" + backendLabel(entry.Identity.Backend) + "] " + entry.Name
 		if len(name) > nameWidth-2 {
 			name = name[:nameWidth-2]
 		}
@@ -804,10 +854,13 @@ func (m Model) renderDescribeBox(entry *cache.CacheEntry) string {
 		// Per-column coloring
 		info := "  " +
 			nameColStyle.Render(fmt.Sprintf("%-*s", nameWidth, name)) + "   " +
-			typeColStyle.Render(fmt.Sprintf("%-12s", entry.Type)) + "   " +
-			versionColStyle.Render(fmt.Sprintf("%8d", entry.Version)) + "   " +
+			typeColStyle.Render(fmt.Sprintf("%-12s", entryTypeLabel(*entry))) + "   " +
+			versionColStyle.Render(fmt.Sprintf("%8s", entryVersionLabel(*entry))) + "   " +
 			modifiedColStyle.Render(fmt.Sprintf("%16s", modifiedStr)) + "  "
 
+		if entry.Identity.Backend == "secretsmanager" {
+			return info + m.renderSecretMetadata(entry)
+		}
 		if len(entry.Tags) > 0 {
 			var tagPairs []string
 			for k, v := range entry.Tags {
@@ -823,15 +876,18 @@ func (m Model) renderDescribeBox(entry *cache.CacheEntry) string {
 	if nameWidth < 20 {
 		nameWidth = 20
 	}
-	name := entry.Name
+	name := "[" + backendLabel(entry.Identity.Backend) + "] " + entry.Name
 	if len(name) > nameWidth-2 {
 		name = name[:nameWidth-2]
 	}
 	info := "  " +
 		nameColStyle.Render(fmt.Sprintf("%-*s", nameWidth, name)) + "   " +
-		typeColStyle.Render(fmt.Sprintf("%-12s", entry.Type)) + "   " +
-		versionColStyle.Render(fmt.Sprintf("%8d", entry.Version))
+		typeColStyle.Render(fmt.Sprintf("%-12s", entryTypeLabel(*entry))) + "   " +
+		versionColStyle.Render(fmt.Sprintf("%8s", entryVersionLabel(*entry)))
 
+	if entry.Identity.Backend == "secretsmanager" {
+		return info + m.renderSecretMetadata(entry)
+	}
 	if len(entry.Tags) > 0 {
 		var tagPairs []string
 		for k, v := range entry.Tags {
@@ -843,6 +899,63 @@ func (m Model) renderDescribeBox(entry *cache.CacheEntry) string {
 	return info
 }
 
+func (m Model) renderSecretMetadata(entry *cache.CacheEntry) string {
+	metadata, ok := m.secretMetadata[entry.Identity]
+	if !ok {
+		return "\n" + dimStyle.Render("  SM metadata unavailable from cache; version metadata is shown below")
+	}
+	lines := []string{"  SM ARN: " + metadata.ARN}
+	if metadata.Description != "" {
+		lines = append(lines, "  Description: "+metadata.Description)
+	}
+	if metadata.KMSKeyID != "" {
+		lines = append(lines, "  KMS key: "+metadata.KMSKeyID)
+	}
+	if metadata.DeletedDate != nil {
+		lines = append(lines, "  Deletion scheduled: "+metadata.DeletedDate.Format(time.RFC3339))
+	}
+	if metadata.RotationEnabled != nil {
+		rotation := "disabled"
+		if *metadata.RotationEnabled {
+			rotation = "enabled"
+		}
+		lines = append(lines, "  Rotation: "+rotation)
+	}
+	if metadata.RotationRules != nil {
+		rules := metadata.RotationRules
+		if rules.ScheduleExpression != "" {
+			lines = append(lines, "  Rotation schedule: "+rules.ScheduleExpression)
+		} else if rules.AutomaticallyAfterDays != nil {
+			lines = append(lines, fmt.Sprintf("  Rotation interval: %d days", *rules.AutomaticallyAfterDays))
+		}
+	}
+	if metadata.LastRotatedDate != nil {
+		lines = append(lines, "  Last rotated: "+metadata.LastRotatedDate.Format(time.RFC3339))
+	}
+	if metadata.NextRotationDate != nil {
+		lines = append(lines, "  Next rotation: "+metadata.NextRotationDate.Format(time.RFC3339))
+	}
+	if metadata.PrimaryRegion != "" {
+		if metadata.Replica {
+			lines = append(lines, "  Replication: replica of "+metadata.PrimaryRegion)
+		} else {
+			lines = append(lines, "  Replication: primary in "+metadata.PrimaryRegion)
+		}
+	}
+	if metadata.OwningService != "" {
+		lines = append(lines, "  Managed by: "+metadata.OwningService)
+	}
+	if len(metadata.Tags) > 0 {
+		var tags []string
+		for key, value := range metadata.Tags {
+			tags = append(tags, key+"="+value)
+		}
+		sort.Strings(tags)
+		lines = append(lines, "  Tags: "+strings.Join(tags, ", "))
+	}
+	return "\n" + dimStyle.Render(strings.Join(lines, "\n"))
+}
+
 // renderConfirmDialog renders the confirmation dialog overlay
 func (m Model) renderConfirmDialog() string {
 	var b strings.Builder
@@ -851,7 +964,7 @@ func (m Model) renderConfirmDialog() string {
 	case "delete":
 		b.WriteString(warningStyle.Render("⚠ CONFIRM DELETE"))
 		b.WriteString("\n\n")
-		fmt.Fprintf(&b, "You are about to delete:\n%s\n\n", m.state.Confirm.Target)
+		fmt.Fprintf(&b, "You are about to delete:\n[%s] %s\n\n", backendLabel(m.state.Confirm.Identity.Backend), m.state.Confirm.Target)
 		b.WriteString(warningStyle.Render("This action cannot be undone!"))
 		b.WriteString("\n\n")
 		b.WriteString(promptStyle.Render("Type 'delete me' to confirm: "))
@@ -859,13 +972,13 @@ func (m Model) renderConfirmDialog() string {
 	case "move":
 		b.WriteString(warningStyle.Render("MOVE/RENAME PARAMETER"))
 		b.WriteString("\n\n")
-		fmt.Fprintf(&b, "From: %s\n\n", m.state.Confirm.Target)
+		fmt.Fprintf(&b, "From: [%s] %s\n\n", backendLabel(m.state.Confirm.Identity.Backend), m.state.Confirm.Target)
 		b.WriteString(promptStyle.Render("To: "))
 		b.WriteString(inputStyle.Render(m.state.Confirm.Input))
 	case "copy":
 		b.WriteString(warningStyle.Render("COPY PARAMETER"))
 		b.WriteString("\n\n")
-		fmt.Fprintf(&b, "From: %s\n\n", m.state.Confirm.Target)
+		fmt.Fprintf(&b, "From: [%s] %s\n\n", backendLabel(m.state.Confirm.Identity.Backend), m.state.Confirm.Target)
 		b.WriteString(promptStyle.Render("To: "))
 		b.WriteString(inputStyle.Render(m.state.Confirm.Input))
 	}

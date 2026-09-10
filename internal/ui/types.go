@@ -3,6 +3,7 @@ package ui
 import (
 	"time"
 
+	"github.com/yachiko/clerk/internal/aws"
 	"github.com/yachiko/clerk/internal/cache"
 )
 
@@ -72,21 +73,27 @@ type State struct {
 	SortAscending bool
 
 	// Type filter
-	FilterType FilterType
+	FilterType    FilterType
+	BackendFilter aws.Backend
 
 	// Describe view state
-	DescribeEntry         *cache.CacheEntry
-	DescribeParamName     string // Track parameter name for lazy loading
-	DescribeGeneration    uint64 // Invalidates results from an earlier detail request.
-	DescribeLoading       bool
-	DescribeValue         string
-	DescribeMasked        bool
-	DescribeHistory       []HistoryEntry
-	HistoryIndex          int
-	HistoryScrollOffset   int
-	ValueScrollOffset     int
-	ValueHorizontalScroll int  // Horizontal scroll position for value
-	ValueLineWrap         bool // Whether to wrap long lines in value
+	DescribeEntry            *cache.CacheEntry
+	DescribeParamName        string // Display name retained for rendering.
+	DescribeIdentity         aws.ResourceIdentity
+	DescribeGeneration       uint64 // Invalidates results from an earlier detail request.
+	DescribeLoading          bool
+	DescribeValue            string
+	DescribeValueKind        aws.ValueKind
+	DescribeValueVersionID   string
+	DescribeValueError       string
+	DescribeMasked           bool
+	DescribeSelectionChanged bool
+	DescribeHistory          []HistoryEntry
+	HistoryIndex             int
+	HistoryScrollOffset      int
+	ValueScrollOffset        int
+	ValueHorizontalScroll    int  // Horizontal scroll position for value
+	ValueLineWrap            bool // Whether to wrap long lines in value
 
 	// Tree view state
 	TreeNodes     []TreeNode
@@ -127,7 +134,9 @@ type State struct {
 // HistoryEntry represents a version history entry
 type HistoryEntry struct {
 	Version     int64
+	VersionID   string
 	Value       string
+	ValueKind   aws.ValueKind
 	Modified    string
 	ValueLoaded bool     // Whether the value has been fetched
 	Labels      []string // Labels attached to this version
@@ -141,6 +150,7 @@ type TreeNode struct {
 	Depth      int
 	Expanded   bool
 	Entry      *cache.CacheEntry // nil for directories
+	Identity   aws.ResourceIdentity
 	ChildCount int
 }
 
@@ -149,6 +159,7 @@ type ConfirmState struct {
 	Active      bool
 	Action      string // "delete", "move", "copy"
 	Target      string // parameter name
+	Identity    aws.ResourceIdentity
 	ConfirmText string // text user must type (for delete)
 	Input       string // current input
 	ErrorMsg    string

@@ -2,6 +2,7 @@ package ui
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
 	"sort"
 	"strings"
@@ -17,18 +18,47 @@ import (
 
 // Model is the main UI model
 type Model struct {
-	state     State
-	client    *aws.Client
-	cache     *cache.Manager
-	config    *config.Config
-	clipboard *util.ClipboardManager
-	backend   aws.Backend
+	state          State
+	client         SSMBrowseClient
+	secrets        SecretsManagerBrowseClient
+	cache          *cache.Manager // SSM compatibility alias.
+	caches         map[aws.Backend]*cache.Manager
+	config         *config.Config
+	clipboard      *util.ClipboardManager
+	backend        aws.Backend
+	scope          aws.ResourceIdentity
+	secretMetadata map[aws.ResourceIdentity]aws.SecretMetadata
 
 	searchInput   textinput.Model
 	ready         bool
 	quitting      bool
 	refreshing    bool
 	refreshCancel context.CancelFunc
+}
+
+// SSMBrowseClient is the Parameter Store surface used by the browser.
+type SSMBrowseClient interface {
+	cache.RefreshClient
+	GetRegion() string
+	GetParameter(context.Context, string, bool) (*aws.Parameter, error)
+	GetParameterMetadata(context.Context, string) (*aws.Parameter, error)
+	GetParameterByVersion(context.Context, string, int64, bool) (*aws.Parameter, error)
+	GetParameterHistory(context.Context, string, int32, bool) ([]aws.ParameterHistory, error)
+	DeleteParameter(context.Context, string) error
+	Transfer(context.Context, aws.TransferInput) (aws.TransferResult, error)
+	PutParameter(context.Context, *aws.PutParameterInput) (*aws.PutParameterOutput, error)
+	LabelParameterVersion(context.Context, *aws.LabelParameterInput) (*aws.LabelParameterOutput, error)
+	UnlabelParameterVersion(context.Context, *aws.UnlabelParameterInput) error
+	AddTagsToResource(context.Context, string, map[string]string) error
+	RemoveTagsFromResource(context.Context, string, []string) error
+	GetParameterTags(context.Context, string) (map[string]string, error)
+}
+
+// SecretsManagerBrowseClient is intentionally read-only.
+type SecretsManagerBrowseClient interface {
+	ListSecrets(context.Context) ([]aws.SecretMetadata, error)
+	ListSecretVersionIds(context.Context, string) ([]aws.SecretVersion, error)
+	GetSecretValue(context.Context, string, aws.SecretValueSelector) (*aws.SecretDetail, error)
 }
 
 // NewModel creates a new browse model
@@ -42,7 +72,7 @@ func NewModel(client *aws.Client, cacheMgr *cache.Manager, cfg *config.Config, s
 	if len(selected) > 0 {
 		backend = selected[0]
 	}
-	return Model{
+	m := Model{
 		state: State{
 			Mode:          ViewModeList,
 			PreviousMode:  ViewModeList,
@@ -50,13 +80,27 @@ func NewModel(client *aws.Client, cacheMgr *cache.Manager, cfg *config.Config, s
 			SortType:      SortByName,
 			SortAscending: true,
 		},
-		client:      client,
-		cache:       cacheMgr,
-		config:      cfg,
-		clipboard:   util.NewClipboardManager(cfg.ClipboardTimeout),
-		backend:     backend,
-		searchInput: ti,
+		client:         client,
+		cache:          cacheMgr,
+		caches:         map[aws.Backend]*cache.Manager{aws.BackendSSM: cacheMgr},
+		config:         cfg,
+		clipboard:      util.NewClipboardManager(cfg.ClipboardTimeout),
+		backend:        backend,
+		searchInput:    ti,
+		secretMetadata: make(map[aws.ResourceIdentity]aws.SecretMetadata),
 	}
+	if client != nil {
+		m.scope = aws.ResourceIdentity{Partition: client.GetPartition(), AccountID: client.GetAccountID(), Region: client.GetRegion()}
+	}
+	return m
+}
+
+// NewCombinedModel constructs one hierarchy over the selected backend caches.
+func NewCombinedModel(ssm SSMBrowseClient, secrets SecretsManagerBrowseClient, caches map[aws.Backend]*cache.Manager, cfg *config.Config, selected aws.Backend, scope aws.ResourceIdentity) Model {
+	m := NewModel(nil, nil, cfg, selected)
+	m.client, m.secrets, m.caches, m.scope = ssm, secrets, caches, scope
+	m.cache = caches[aws.BackendSSM]
+	return m
 }
 
 // Init implements tea.Model
@@ -71,10 +115,25 @@ func (m Model) Init() tea.Cmd {
 
 // loadEntries loads entries from cache
 func (m Model) loadEntries() tea.Msg {
-	entries := m.cache.GetAll()
-	// Update cache age
-	m.state.CacheAge = m.cache.GetAge()
+	entries := m.cachedEntries()
 	return entriesLoadedMsg{entries: entries}
+}
+
+func (m Model) selectedBackends() []aws.Backend {
+	if m.backend == aws.BackendAll {
+		return []aws.Backend{aws.BackendSSM, aws.BackendSecretsManager}
+	}
+	return []aws.Backend{m.backend}
+}
+
+func (m Model) cachedEntries() []cache.CacheEntry {
+	var entries []cache.CacheEntry
+	for _, backend := range m.selectedBackends() {
+		if manager := m.caches[backend]; manager != nil {
+			entries = append(entries, manager.GetAll()...)
+		}
+	}
+	return entries
 }
 
 // checkBackgroundRefresh checks if cache should be refreshed in background
@@ -85,14 +144,20 @@ func (m Model) checkBackgroundRefresh() tea.Msg {
 	}
 
 	// Check if cache is empty (first run)
-	if len(m.cache.GetAll()) == 0 {
+	if len(m.cachedEntries()) == 0 {
 		return backgroundRefreshStartMsg{}
 	}
 
 	// The cache tracks never-refreshed and incomplete snapshots explicitly.
 	// Do not treat mutation-only entries with a zero refresh time as fresh.
-	cacheAge := m.cache.GetAge()
-	if !m.cache.IsExpired() && cacheAge < m.config.BrowseRefreshCooldown {
+	fresh := true
+	for _, backend := range m.selectedBackends() {
+		manager := m.caches[backend]
+		if manager == nil || manager.IsExpired() || manager.GetAge() >= m.config.BrowseRefreshCooldown {
+			fresh = false
+		}
+	}
+	if fresh {
 		// Cache is fresh, no refresh needed
 		return nil
 	}
@@ -103,14 +168,79 @@ func (m Model) checkBackgroundRefresh() tea.Msg {
 
 // doBackgroundRefresh performs cache refresh in background with live progress
 func (m Model) doBackgroundRefresh(ctx context.Context) tea.Cmd {
+	if m.backend == aws.BackendAll || m.backend == aws.BackendSecretsManager {
+		return m.refreshInventories(ctx)
+	}
 	return func() tea.Msg {
 		// This will be replaced by the streaming version
 		return startRefreshWithProgress(ctx, m.cache, m.client, m.config)
 	}
 }
 
+type inventoryProviderResult struct {
+	backend  aws.Backend
+	entries  []cache.CacheEntry
+	metadata []aws.SecretMetadata
+	err      error
+}
+
+type inventoriesRefreshedMsg struct {
+	results []inventoryProviderResult
+}
+
+func (m Model) refreshInventories(ctx context.Context) tea.Cmd {
+	return func() tea.Msg {
+		backends := m.selectedBackends()
+		results := make(chan inventoryProviderResult, len(backends))
+		for _, backend := range backends {
+			backend := backend
+			go func() {
+				result := inventoryProviderResult{backend: backend}
+				switch backend {
+				case aws.BackendSSM:
+					manager := m.caches[backend]
+					if manager == nil || m.client == nil {
+						result.err = fmt.Errorf("provider is unavailable")
+					} else {
+						result.err = manager.Refresh(ctx, m.client, m.scope.Region, m.config.ParallelFetches, nil)
+						result.entries = manager.GetAll()
+					}
+				case aws.BackendSecretsManager:
+					manager := m.caches[backend]
+					if manager == nil || m.secrets == nil {
+						result.err = fmt.Errorf("provider is unavailable")
+					} else {
+						result.metadata, result.err = m.secrets.ListSecrets(ctx)
+						if result.err == nil {
+							for _, secret := range result.metadata {
+								modified := time.Time{}
+								if secret.LastChangedDate != nil {
+									modified = *secret.LastChangedDate
+								} else if secret.CreatedDate != nil {
+									modified = *secret.CreatedDate
+								}
+								result.entries = append(result.entries, cache.CacheEntry{Identity: secret.Identity, Name: secret.Name, LastModifiedDate: modified, Tags: secret.Tags, TagsComplete: true})
+							}
+							result.err = manager.ReplaceSnapshot(result.entries)
+						}
+						if result.err != nil {
+							result.entries = manager.GetAll()
+						}
+					}
+				}
+				results <- result
+			}()
+		}
+		all := make([]inventoryProviderResult, 0, len(backends))
+		for range backends {
+			all = append(all, <-results)
+		}
+		return inventoriesRefreshedMsg{results: all}
+	}
+}
+
 // startRefreshWithProgress starts the refresh and returns a sub for progress updates
-func startRefreshWithProgress(ctx context.Context, cacheMgr *cache.Manager, client *aws.Client, cfg *config.Config) tea.Msg {
+func startRefreshWithProgress(ctx context.Context, cacheMgr *cache.Manager, client SSMBrowseClient, cfg *config.Config) tea.Msg {
 	// Create a channel for progress
 	progressCh := make(chan refreshEvent, 100)
 
@@ -181,6 +311,7 @@ type errorMsg string
 type clearStatusMsg struct{}
 type describeLoadedMsg struct {
 	name       string
+	identity   aws.ResourceIdentity
 	generation uint64
 	value      string
 	history    []HistoryEntry
@@ -188,30 +319,71 @@ type describeLoadedMsg struct {
 
 type versionValuesLoadedMsg struct {
 	name       string
+	identity   aws.ResourceIdentity
 	generation uint64
 	versions   map[int64]string // version -> value mapping
 }
+type resourceErrorMsg struct {
+	identity   aws.ResourceIdentity
+	generation uint64
+	message    string
+}
+type resourceStatusMsg struct {
+	identity   aws.ResourceIdentity
+	generation uint64
+	message    string
+}
+type secretDetailLoadedMsg struct {
+	identity   aws.ResourceIdentity
+	generation uint64
+	metadata   aws.SecretMetadata
+	versions   []aws.SecretVersion
+	err        error
+}
+type secretValueLoadedMsg struct {
+	identity           aws.ResourceIdentity
+	generation         uint64
+	requestedVersionID string
+	versionID          string
+	value              aws.ResourceValue
+	copy               bool
+	err                error
+}
+type parameterValueLoadedMsg struct {
+	identity   aws.ResourceIdentity
+	generation uint64
+	value      string
+	err        error
+}
 
 type editCompleteMsg struct {
-	name     string
-	newValue string
-	version  int64
-	err      error
+	identity   aws.ResourceIdentity
+	generation uint64
+	name       string
+	newValue   string
+	version    int64
+	err        error
 }
 
 type editPreparedMsg struct {
-	name     string
-	original aws.Parameter
-	session  *util.EditorSession
-	err      error
+	identity   aws.ResourceIdentity
+	generation uint64
+	name       string
+	original   aws.Parameter
+	session    *util.EditorSession
+	err        error
 }
 
 type deleteCompleteMsg struct {
-	name string
-	err  error
+	identity   aws.ResourceIdentity
+	generation uint64
+	name       string
+	err        error
 }
 
 type moveCompleteMsg struct {
+	identity    aws.ResourceIdentity
+	generation  uint64
 	source      string
 	target      string
 	destination *aws.Parameter
@@ -220,6 +392,8 @@ type moveCompleteMsg struct {
 }
 
 type copyCompleteMsg struct {
+	identity    aws.ResourceIdentity
+	generation  uint64
 	source      string
 	target      string
 	destination *aws.Parameter
@@ -229,26 +403,32 @@ type copyCompleteMsg struct {
 
 // Label operation messages
 type labelCompleteMsg struct {
-	action  string
-	label   string
-	version int64
-	err     error
+	identity   aws.ResourceIdentity
+	generation uint64
+	action     string
+	label      string
+	version    int64
+	err        error
 }
 
 type tagCompleteMsg struct {
-	action string
-	key    string
-	err    error
+	identity   aws.ResourceIdentity
+	generation uint64
+	action     string
+	key        string
+	err        error
 }
 
 type tagsRefreshMsg struct {
 	name       string
+	identity   aws.ResourceIdentity
 	generation uint64
 	tags       map[string]string
 }
 
 type historyRefreshMsg struct {
 	name       string
+	identity   aws.ResourceIdentity
 	generation uint64
 	history    []aws.ParameterHistory
 }
@@ -404,8 +584,34 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case entriesLoadedMsg:
 		m.state.Entries = msg.entries
-		m.state.CacheAge = m.cache.GetAge()
+		m.state.CacheAge = m.cacheAge()
 		m.filterEntries()
+		return m, nil
+
+	case inventoriesRefreshedMsg:
+		if m.refreshCancel != nil {
+			m.refreshCancel()
+			m.refreshCancel = nil
+		}
+		m.refreshing = false
+		var entries []cache.CacheEntry
+		var failures []string
+		for _, result := range msg.results {
+			entries = append(entries, result.entries...)
+			for _, metadata := range result.metadata {
+				m.secretMetadata[metadata.Identity] = metadata
+			}
+			if result.err != nil {
+				failures = append(failures, backendLabel(result.backend)+": "+result.err.Error())
+			}
+		}
+		m.state.Entries, m.state.CacheAge = entries, m.cacheAge()
+		m.filterEntries()
+		if len(failures) > 0 {
+			m.state.ErrorMessage = "Provider refresh failed (successful rows retained): " + strings.Join(failures, "; ")
+		} else {
+			m.state.StatusMessage = fmt.Sprintf("SSM/SM inventory refreshed - %d resources loaded", len(entries))
+		}
 		return m, nil
 
 	case backgroundRefreshStartMsg:
@@ -452,7 +658,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		// Load entries from cache
-		entries := m.cache.GetAll()
+		entries := m.cachedEntries()
 
 		if len(entries) == 0 {
 			// Refresh failed - user is offline
@@ -486,23 +692,43 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return clearStatusMsg{}
 		})
 
+	case resourceErrorMsg:
+		if !m.currentResource(msg.identity, msg.generation) {
+			return m, nil
+		}
+		m.state.ErrorMessage = backendLabel(msg.identity.Backend) + " " + m.state.DescribeParamName + ": " + msg.message
+		m.state.StatusMessage = ""
+		return m, nil
+
+	case resourceStatusMsg:
+		if !m.currentResource(msg.identity, msg.generation) {
+			return m, nil
+		}
+		m.state.StatusMessage = backendLabel(msg.identity.Backend) + " " + m.resourceName(msg.identity) + ": " + msg.message
+		m.state.ErrorMessage = ""
+		return m, nil
+
 	case clearStatusMsg:
 		m.state.StatusMessage = ""
 		m.state.ErrorMessage = ""
 		return m, nil
 
 	case describeLoadedMsg:
-		if msg.generation != m.state.DescribeGeneration || msg.name != m.state.DescribeParamName || m.state.Mode != ViewModeDescribe {
+		if msg.identity != (aws.ResourceIdentity{}) && !m.currentResource(msg.identity, msg.generation) || msg.identity == (aws.ResourceIdentity{}) && (msg.generation != m.state.DescribeGeneration || msg.name != m.state.DescribeParamName || m.state.Mode != ViewModeDescribe) {
 			return m, nil
 		}
 		m.state.DescribeValue = msg.value
 		m.state.DescribeHistory = msg.history
+		m.state.DescribeValueKind = ""
+		if len(msg.history) > 0 && msg.history[0].ValueLoaded {
+			m.state.DescribeValueKind = aws.ValueText
+		}
 		m.state.HistoryIndex = 0
 		m.state.DescribeLoading = false
 		return m, nil
 
 	case versionValuesLoadedMsg:
-		if msg.generation != m.state.DescribeGeneration || msg.name != m.state.DescribeParamName || m.state.Mode != ViewModeDescribe {
+		if msg.identity != (aws.ResourceIdentity{}) && !m.currentResource(msg.identity, msg.generation) || msg.identity == (aws.ResourceIdentity{}) && (msg.generation != m.state.DescribeGeneration || msg.name != m.state.DescribeParamName || m.state.Mode != ViewModeDescribe) {
 			return m, nil
 		}
 		// Update history entries with loaded values
@@ -510,22 +736,132 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if value, ok := msg.versions[m.state.DescribeHistory[i].Version]; ok {
 				m.state.DescribeHistory[i].Value = value
 				m.state.DescribeHistory[i].ValueLoaded = true
+				m.state.DescribeHistory[i].ValueKind = aws.ValueText
 			}
 		}
 		// Update current displayed value if it was loaded
 		if m.state.HistoryIndex < len(m.state.DescribeHistory) {
 			m.state.DescribeValue = m.state.DescribeHistory[m.state.HistoryIndex].Value
+			m.state.DescribeValueKind = aws.ValueText
 		}
 		return m, nil
 
+	case secretDetailLoadedMsg:
+		if !m.currentResource(msg.identity, msg.generation) {
+			return m, nil
+		}
+		m.state.DescribeLoading = false
+		if msg.metadata.Identity == msg.identity {
+			m.secretMetadata[msg.identity] = msg.metadata
+			m.state.DescribeEntry.Tags = msg.metadata.Tags
+		}
+		if msg.err != nil {
+			m.state.ErrorMessage = "SM " + m.state.DescribeParamName + ": metadata/version load failed: " + msg.err.Error()
+			return m, nil
+		}
+		m.state.DescribeHistory = make([]HistoryEntry, 0, len(msg.versions))
+		for _, version := range msg.versions {
+			modified := ""
+			if version.CreatedDate != nil {
+				modified = version.CreatedDate.Format(time.RFC3339)
+			}
+			m.state.DescribeHistory = append(m.state.DescribeHistory, HistoryEntry{VersionID: version.VersionID, Modified: modified, Labels: version.VersionStages})
+		}
+		if !m.state.DescribeSelectionChanged {
+			for i := range m.state.DescribeHistory {
+				if hasStage(m.state.DescribeHistory[i], "AWSCURRENT") {
+					m.state.HistoryIndex = i
+					break
+				}
+			}
+		}
+		if m.state.DescribeValueKind != "" && m.state.DescribeValueVersionID != "" {
+			for i := range m.state.DescribeHistory {
+				if m.state.DescribeHistory[i].VersionID == m.state.DescribeValueVersionID {
+					m.state.DescribeHistory[i].Value = m.state.DescribeValue
+					m.state.DescribeHistory[i].ValueKind = m.state.DescribeValueKind
+					m.state.DescribeHistory[i].ValueLoaded = true
+					break
+				}
+			}
+		}
+		return m, nil
+
+	case secretValueLoadedMsg:
+		if !m.currentResource(msg.identity, msg.generation) {
+			return m, nil
+		}
+		if msg.requestedVersionID == "" && !m.state.DescribeSelectionChanged {
+			for i := range m.state.DescribeHistory {
+				if m.state.DescribeHistory[i].VersionID == msg.versionID {
+					m.state.HistoryIndex = i
+					break
+				}
+			}
+		}
+		selectedVersion := m.selectedSecretVersionID()
+		isCurrentVersion := selectedVersion == "" || selectedVersion == msg.versionID
+		if msg.err != nil {
+			if msg.requestedVersionID == "" && !m.state.DescribeSelectionChanged {
+				isCurrentVersion = true
+			}
+			if msg.copy {
+				m.state.ErrorMessage = "SM " + m.state.DescribeParamName + ": copy failed: " + msg.err.Error()
+			}
+			if isCurrentVersion {
+				m.state.DescribeLoading = false
+				m.state.DescribeValueError = msg.err.Error()
+				if !msg.copy {
+					m.state.ErrorMessage = "SM " + m.state.DescribeParamName + ": value unavailable: " + msg.err.Error()
+				}
+			}
+			return m, nil
+		}
+		rendered := msg.value.Text
+		if msg.value.Kind == aws.ValueBinary {
+			rendered = base64.StdEncoding.EncodeToString(msg.value.Binary)
+		}
+		if msg.copy && m.state.Mode != ViewModeDescribe {
+			return m, m.copyResourceValue(msg.identity, msg.generation, rendered, msg.value.Kind)
+		}
+		for i := range m.state.DescribeHistory {
+			if m.state.DescribeHistory[i].VersionID == msg.versionID {
+				m.state.DescribeHistory[i].Value, m.state.DescribeHistory[i].ValueKind, m.state.DescribeHistory[i].ValueLoaded = rendered, msg.value.Kind, true
+			}
+		}
+		if !isCurrentVersion {
+			if msg.copy {
+				return m, m.copyResourceValue(msg.identity, msg.generation, rendered, msg.value.Kind)
+			}
+			return m, nil
+		}
+		m.state.DescribeLoading = false
+		m.state.DescribeValue, m.state.DescribeValueKind, m.state.DescribeValueVersionID, m.state.DescribeValueError = rendered, msg.value.Kind, msg.versionID, ""
+		m.state.ErrorMessage = ""
+		if msg.copy {
+			return m, m.copyResourceValue(msg.identity, msg.generation, rendered, msg.value.Kind)
+		}
+		return m, nil
+
+	case parameterValueLoadedMsg:
+		if !m.currentResource(msg.identity, msg.generation) {
+			return m, nil
+		}
+		if msg.err != nil {
+			m.state.ErrorMessage = "SSM " + m.resourceName(msg.identity) + ": value unavailable: " + msg.err.Error()
+			return m, nil
+		}
+		return m, m.copyResourceValue(msg.identity, msg.generation, msg.value, aws.ValueText)
+
 	case editCompleteMsg:
 		if msg.err != nil {
-			return m, func() tea.Msg { return errorMsg(msg.err.Error()) }
+			m.state.ErrorMessage = fmt.Sprintf("%s %s: %v", backendLabel(msg.identity.Backend), m.resourceName(msg.identity), msg.err)
+			return m, nil
 		}
 
 		// Update cache
 		for i := range m.state.Entries {
-			if m.state.Entries[i].Name == msg.name {
+			if m.state.Entries[i].Identity == msg.identity {
 				m.state.Entries[i].Version = msg.version
 				m.state.Entries[i].LastModifiedDate = time.Now()
 				break
@@ -534,12 +870,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.filterEntries()
 
 		// Update cache manager
-		if entry, ok := m.cache.Get(msg.name); ok {
-			entry.Version = msg.version
-			entry.LastModifiedDate = time.Now()
-			_ = m.cache.Update(*entry)
+		if manager := m.caches[msg.identity.Backend]; manager != nil {
+			if entry, ok := manager.GetByIdentity(msg.identity); ok {
+				entry.Version = msg.version
+				entry.LastModifiedDate = time.Now()
+				_ = manager.Update(*entry)
+			}
 		}
-		if m.state.Mode == ViewModeDescribe && m.state.DescribeParamName == msg.name {
+		if m.state.Mode == ViewModeDescribe && m.state.DescribeIdentity == msg.identity {
 			m.state.DescribeValue = msg.newValue
 			m.state.DescribeLoading = false
 			found := false
@@ -555,13 +893,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 
-		return m, func() tea.Msg {
-			return statusMsg(fmt.Sprintf("Updated %s to version %d", msg.name, msg.version))
-		}
+		m.state.StatusMessage = fmt.Sprintf("%s %s: updated to version %d", backendLabel(msg.identity.Backend), msg.name, msg.version)
+		m.state.ErrorMessage = ""
+		return m, nil
 
 	case editPreparedMsg:
+		if msg.identity != (aws.ResourceIdentity{}) && !m.currentResource(msg.identity, msg.generation) {
+			if msg.session != nil {
+				_ = msg.session.Close()
+			}
+			return m, nil
+		}
 		if msg.err != nil {
-			return m, func() tea.Msg { return errorMsg(msg.err.Error()) }
+			return m, func() tea.Msg {
+				return resourceErrorMsg{identity: msg.identity, generation: msg.generation, message: msg.err.Error()}
+			}
 		}
 		// tea.ExecProcess releases and restores the terminal around an
 		// interactive editor. Saving deliberately uses a fresh deadline after
@@ -569,50 +915,51 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.ExecProcess(msg.session.Command(), func(runErr error) tea.Msg {
 			defer func() { _ = msg.session.Close() }()
 			if runErr != nil {
-				return editCompleteMsg{err: fmt.Errorf("editor error: %w", runErr)}
+				return editCompleteMsg{identity: msg.identity, generation: msg.generation, err: fmt.Errorf("editor error: %w", runErr)}
 			}
 			newValue, err := msg.session.Read()
 			if err != nil {
-				return editCompleteMsg{err: fmt.Errorf("failed to read edited value: %w", err)}
+				return editCompleteMsg{identity: msg.identity, generation: msg.generation, err: fmt.Errorf("failed to read edited value: %w", err)}
 			}
 			if newValue == msg.original.Value {
-				return statusMsg("No changes made")
+				return resourceStatusMsg{identity: msg.identity, generation: msg.generation, message: "no changes made"}
 			}
 			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			defer cancel()
 			current, err := m.client.GetParameter(ctx, msg.name, false)
 			if err != nil {
-				return editCompleteMsg{err: fmt.Errorf("failed to check current version: %w", err)}
+				return editCompleteMsg{identity: msg.identity, generation: msg.generation, err: fmt.Errorf("failed to check current version: %w", err)}
 			}
 			if current.Version != msg.original.Version {
-				return editCompleteMsg{err: fmt.Errorf("parameter changed from version %d to %d while editing; review and retry", msg.original.Version, current.Version)}
+				return editCompleteMsg{identity: msg.identity, generation: msg.generation, err: fmt.Errorf("parameter changed from version %d to %d while editing; review and retry", msg.original.Version, current.Version)}
 			}
 			output, err := m.client.PutParameter(ctx, &aws.PutParameterInput{Name: msg.name, Value: newValue, Type: msg.original.Type, Overwrite: true, KMSKeyID: msg.original.KMSKeyID, Description: msg.original.Description, Tier: msg.original.Tier, AllowedPattern: msg.original.AllowedPattern, Policies: msg.original.Policies, DataType: msg.original.DataType})
 			if err != nil {
-				return editCompleteMsg{err: fmt.Errorf("failed to update: %w", err)}
+				return editCompleteMsg{identity: msg.identity, generation: msg.generation, err: fmt.Errorf("failed to update: %w", err)}
 			}
-			return editCompleteMsg{name: msg.name, newValue: newValue, version: output.Version}
+			return editCompleteMsg{identity: msg.identity, generation: msg.generation, name: msg.name, newValue: newValue, version: output.Version}
 		})
 
 	case deleteCompleteMsg:
 		if msg.err != nil {
-			return m, func() tea.Msg { return errorMsg("Delete failed: " + msg.err.Error()) }
+			m.state.ErrorMessage = fmt.Sprintf("%s %s: delete failed: %v", backendLabel(msg.identity.Backend), msg.name, msg.err)
+			return m, nil
 		}
 
 		// Remove from cache
-		_ = m.cache.Delete(msg.name)
+		if manager := m.caches[msg.identity.Backend]; manager != nil {
+			_ = manager.DeleteByIdentity(msg.identity)
+		}
+		m.state.StatusMessage = fmt.Sprintf("%s %s: deleted", backendLabel(msg.identity.Backend), msg.name)
+		m.state.ErrorMessage = ""
 
 		// Reload entries from cache
-		return m, tea.Batch(
-			m.loadEntries,
-			func() tea.Msg {
-				return statusMsg(fmt.Sprintf("Deleted %s", msg.name))
-			},
-		)
+		return m, m.loadEntries
 
 	case moveCompleteMsg:
 		if msg.err != nil {
-			return m, func() tea.Msg { return errorMsg("Move failed: " + msg.err.Error()) }
+			m.state.ErrorMessage = fmt.Sprintf("%s %s: move failed: %v", backendLabel(msg.identity.Backend), msg.source, msg.err)
+			return m, nil
 		}
 
 		// Remove from cache
@@ -630,16 +977,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.warning != "" {
 			status += " (remote write succeeded; cache refresh needed)"
 		}
-		return m, tea.Batch(
-			m.loadEntries,
-			func() tea.Msg {
-				return statusMsg(status)
-			},
-		)
+		m.state.StatusMessage = fmt.Sprintf("%s %s: %s", backendLabel(msg.identity.Backend), msg.source, status)
+		m.state.ErrorMessage = ""
+		return m, m.loadEntries
 
 	case copyCompleteMsg:
 		if msg.err != nil {
-			return m, func() tea.Msg { return errorMsg("Copy failed: " + msg.err.Error()) }
+			m.state.ErrorMessage = fmt.Sprintf("%s %s: copy failed: %v", backendLabel(msg.identity.Backend), msg.source, msg.err)
+			return m, nil
 		}
 
 		if msg.destination != nil {
@@ -652,37 +997,40 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.warning != "" {
 			status += " (remote write succeeded; cache refresh needed)"
 		}
-		return m, tea.Batch(
-			m.loadEntries,
-			func() tea.Msg {
-				return statusMsg(status)
-			},
-		)
+		m.state.StatusMessage = fmt.Sprintf("%s %s: %s", backendLabel(msg.identity.Backend), msg.source, status)
+		m.state.ErrorMessage = ""
+		return m, m.loadEntries
 
 	case labelCompleteMsg:
+		if msg.identity != (aws.ResourceIdentity{}) && !m.currentResource(msg.identity, msg.generation) {
+			return m, nil
+		}
 		if msg.err != nil {
-			m.state.ErrorMessage = fmt.Sprintf("Label %s failed: %v", msg.action, msg.err)
+			m.state.ErrorMessage = fmt.Sprintf("%s %s: label %s failed: %v", backendLabel(msg.identity.Backend), m.resourceName(msg.identity), msg.action, msg.err)
 			return m, tea.Tick(3*time.Second, func(t time.Time) tea.Msg {
 				return clearStatusMsg{}
 			})
 		}
 
 		// Refresh history to show updated labels
-		m.state.StatusMessage = fmt.Sprintf("Label '%s' %sed on v%d", msg.label, msg.action, msg.version)
+		m.state.StatusMessage = fmt.Sprintf("%s %s: label '%s' %sed on v%d", backendLabel(msg.identity.Backend), m.resourceName(msg.identity), msg.label, msg.action, msg.version)
 
 		// Trigger history refresh
 		return m, m.refreshHistory()
 
 	case tagCompleteMsg:
+		if msg.identity != (aws.ResourceIdentity{}) && !m.currentResource(msg.identity, msg.generation) {
+			return m, nil
+		}
 		if msg.err != nil {
-			m.state.ErrorMessage = fmt.Sprintf("Tag %s failed: %v", msg.action, msg.err)
+			m.state.ErrorMessage = fmt.Sprintf("%s %s: tag %s failed: %v", backendLabel(msg.identity.Backend), m.resourceName(msg.identity), msg.action, msg.err)
 			return m, tea.Tick(3*time.Second, func(t time.Time) tea.Msg {
 				return clearStatusMsg{}
 			})
 		}
 
 		// Refresh tags on the entry
-		m.state.StatusMessage = fmt.Sprintf("Tag '%s' %sed", msg.key, msg.action)
+		m.state.StatusMessage = fmt.Sprintf("%s %s: tag '%s' %sed", backendLabel(msg.identity.Backend), m.resourceName(msg.identity), msg.key, msg.action)
 		return m, tea.Batch(
 			m.refreshTags(),
 			tea.Tick(3*time.Second, func(t time.Time) tea.Msg {
@@ -691,17 +1039,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		)
 
 	case tagsRefreshMsg:
-		if msg.generation == m.state.DescribeGeneration && msg.name == m.state.DescribeParamName && m.state.DescribeEntry != nil {
+		if m.currentResource(msg.identity, msg.generation) && m.state.DescribeEntry != nil {
 			m.state.DescribeEntry.Tags = msg.tags
 			for i := range m.state.Entries {
-				if m.state.Entries[i].Name == msg.name {
+				if m.state.Entries[i].Identity == msg.identity {
 					m.state.Entries[i].Tags = msg.tags
 				}
 			}
-			if entry, ok := m.cache.Get(msg.name); ok {
-				entry.Tags, entry.TagsComplete, entry.TagsError, entry.TagsFetchedAt = msg.tags, true, "", time.Now()
-				if err := m.cache.Update(*entry); err != nil {
-					m.state.ErrorMessage = "Tags updated remotely but cache update failed: " + err.Error()
+			if manager := m.caches[msg.identity.Backend]; manager != nil {
+				if entry, ok := manager.GetByIdentity(msg.identity); ok {
+					entry.Tags, entry.TagsComplete, entry.TagsError, entry.TagsFetchedAt = msg.tags, true, "", time.Now()
+					if err := manager.Update(*entry); err != nil {
+						m.state.ErrorMessage = "Tags updated remotely but cache update failed: " + err.Error()
+					}
 				}
 			}
 			m.filterEntries()
@@ -709,7 +1059,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case historyRefreshMsg:
-		if msg.generation != m.state.DescribeGeneration || msg.name != m.state.DescribeParamName || m.state.Mode != ViewModeDescribe {
+		if !m.currentResource(msg.identity, msg.generation) {
 			return m, nil
 		}
 		// Save the version the user was viewing before refresh
@@ -780,6 +1130,55 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, tea.Batch(cmds...)
 }
 
+func (m Model) cacheAge() time.Duration {
+	var oldest time.Duration
+	for _, backend := range m.selectedBackends() {
+		if manager := m.caches[backend]; manager != nil && manager.GetAge() > oldest {
+			oldest = manager.GetAge()
+		}
+	}
+	return oldest
+}
+
+func (m Model) currentResource(identity aws.ResourceIdentity, generation uint64) bool {
+	if generation != m.state.DescribeGeneration {
+		return false
+	}
+	if m.state.Mode == ViewModeDescribe {
+		return identity == m.state.DescribeIdentity
+	}
+	entry := m.getSelectedEntry()
+	return entry != nil && entry.Identity == identity
+}
+
+func (m Model) resourceName(identity aws.ResourceIdentity) string {
+	if identity == m.state.DescribeIdentity && m.state.DescribeParamName != "" {
+		return m.state.DescribeParamName
+	}
+	for _, entry := range m.state.Entries {
+		if entry.Identity == identity {
+			return entry.Name
+		}
+	}
+	return identity.CanonicalID
+}
+
+func (m Model) blockSecretsManagerMutation(identity aws.ResourceIdentity, action string) (bool, Model) {
+	if identity.Backend != aws.BackendSecretsManager {
+		return false, m
+	}
+	m.state.StatusMessage = fmt.Sprintf("SM %s: %s is disabled; Secrets Manager browse support is read-only", m.resourceName(identity), action)
+	m.state.ErrorMessage = ""
+	return true, m
+}
+
+func backendLabel(backend aws.Backend) string {
+	if backend == aws.BackendSecretsManager {
+		return "SM"
+	}
+	return "SSM"
+}
+
 // handleKeyPress handles keyboard input
 func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// Handle confirmation dialog first
@@ -800,6 +1199,7 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.state.DescribeValue = ""
 			m.state.DescribeHistory = nil
 			m.state.DescribeEntry = nil
+			m.state.DescribeIdentity = aws.ResourceIdentity{}
 			m.state.Mode = m.state.PreviousMode
 			return m, nil
 		}
@@ -941,6 +1341,18 @@ func (m Model) handleBrowseKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.filterEntries()
 		return m, nil
 
+	case "b":
+		switch m.state.BackendFilter {
+		case "", aws.BackendAll:
+			m.state.BackendFilter = aws.BackendSSM
+		case aws.BackendSSM:
+			m.state.BackendFilter = aws.BackendSecretsManager
+		default:
+			m.state.BackendFilter = aws.BackendAll
+		}
+		m.filterEntries()
+		return m, nil
+
 	case " ":
 		// Toggle expand/collapse in tree view
 		if m.state.Mode == ViewModeTree && len(m.state.TreeNodes) > 0 {
@@ -961,15 +1373,22 @@ func (m Model) handleBrowseKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			// Trim whitespace from parameter name in case of encoding issues
 			paramName := strings.TrimSpace(entry.Name)
 			if paramName == "" {
+				identity, generation := entry.Identity, m.state.DescribeGeneration
 				return m, func() tea.Msg {
-					return errorMsg("Invalid parameter name")
+					return resourceErrorMsg{identity: identity, generation: generation, message: "invalid resource name"}
 				}
 			}
-			m.state.DescribeEntry = entry
+			selected := *entry
+			m.state.DescribeEntry = &selected
 			m.state.DescribeGeneration++
 			m.state.DescribeParamName = paramName
+			m.state.DescribeIdentity = entry.Identity
 			m.state.DescribeLoading = true
 			m.state.DescribeValue = ""
+			m.state.DescribeValueKind = ""
+			m.state.DescribeValueVersionID = ""
+			m.state.DescribeValueError = ""
+			m.state.DescribeSelectionChanged = false
 			m.state.DescribeHistory = nil
 			m.state.HistoryIndex = 0
 			m.state.HistoryScrollOffset = 0
@@ -977,9 +1396,10 @@ func (m Model) handleBrowseKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.state.ValueHorizontalScroll = 0
 			m.state.PreviousMode = m.state.Mode // Store current mode to restore later
 			m.state.Mode = ViewModeDescribe
-			// Use config to determine if value should be masked by default
-			m.state.DescribeMasked = !m.config.DecryptByDefault
-			return m, m.loadDescribe(paramName, m.state.DescribeGeneration)
+			// Opening detail is metadata-only for both providers. Values require an
+			// explicit reveal or copy action.
+			m.state.DescribeMasked = true
+			return m, m.loadDescribe(entry.Identity, paramName, m.state.DescribeGeneration)
 		}
 		return m, nil
 
@@ -987,7 +1407,10 @@ func (m Model) handleBrowseKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// Copy secret value
 		entry := m.getSelectedEntry()
 		if entry != nil {
-			return m, m.copySecret(entry.Name)
+			if entry.Identity.Backend == aws.BackendSecretsManager {
+				return m, m.loadSecretValue(entry.Identity, "", true, m.state.DescribeGeneration)
+			}
+			return m, m.copySecret(entry.Identity, entry.Name)
 		}
 		return m, nil
 
@@ -995,7 +1418,10 @@ func (m Model) handleBrowseKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// Edit
 		entry := m.getSelectedEntry()
 		if entry != nil {
-			return m, m.editSecret(entry.Name)
+			if blocked, next := m.blockSecretsManagerMutation(entry.Identity, "edit"); blocked {
+				return next, nil
+			}
+			return m, m.editSecret(entry.Identity, entry.Name)
 		}
 		return m, nil
 
@@ -1003,7 +1429,10 @@ func (m Model) handleBrowseKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// Delete (requires confirmation)
 		entry := m.getSelectedEntry()
 		if entry != nil {
-			return m, m.initiateDelete(entry.Name)
+			if blocked, next := m.blockSecretsManagerMutation(entry.Identity, "delete"); blocked {
+				return next, nil
+			}
+			return m, m.initiateDelete(entry.Identity, entry.Name)
 		}
 		return m, nil
 
@@ -1011,10 +1440,14 @@ func (m Model) handleBrowseKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// Move/rename
 		entry := m.getSelectedEntry()
 		if entry != nil {
+			if blocked, next := m.blockSecretsManagerMutation(entry.Identity, "move"); blocked {
+				return next, nil
+			}
 			m.state.Confirm = ConfirmState{
-				Active: true,
-				Action: "move",
-				Target: entry.Name,
+				Active:   true,
+				Action:   "move",
+				Target:   entry.Name,
+				Identity: entry.Identity,
 			}
 		}
 		return m, nil
@@ -1023,10 +1456,14 @@ func (m Model) handleBrowseKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// Copy
 		entry := m.getSelectedEntry()
 		if entry != nil {
+			if blocked, next := m.blockSecretsManagerMutation(entry.Identity, "copy-to"); blocked {
+				return next, nil
+			}
 			m.state.Confirm = ConfirmState{
-				Active: true,
-				Action: "copy",
-				Target: entry.Name,
+				Active:   true,
+				Action:   "copy",
+				Target:   entry.Name,
+				Identity: entry.Identity,
 			}
 		}
 		return m, nil
@@ -1081,8 +1518,10 @@ func (m Model) handleDescribeKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.state.DescribeLoading = false
 		m.state.DescribeParamName = ""
 		m.state.DescribeValue = ""
+		m.state.DescribeValueVersionID = ""
 		m.state.DescribeHistory = nil
 		m.state.DescribeEntry = nil
+		m.state.DescribeIdentity = aws.ResourceIdentity{}
 		m.state.Mode = m.state.PreviousMode
 		// Reset scroll offsets
 		m.state.HistoryScrollOffset = 0
@@ -1106,22 +1545,32 @@ func (m Model) handleDescribeKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case "c":
 		// Copy value
-		if !m.state.DescribeLoading && m.state.DescribeValue != "" {
-			return m, m.copyValue(m.state.DescribeValue)
+		if m.state.DescribeIdentity.Backend == aws.BackendSecretsManager && m.state.DescribeValueKind == "" {
+			return m, m.loadSelectedSecretValue(true)
+		}
+		if !m.state.DescribeLoading && m.state.DescribeValueKind != "" {
+			kind := m.state.DescribeValueKind
+			if kind == "" {
+				kind = aws.ValueText
+			}
+			return m, m.copyResourceValue(m.state.DescribeIdentity, m.state.DescribeGeneration, m.state.DescribeValue, kind)
 		}
 		return m, nil
 
 	case "C":
 		// Copy parameter name/path
 		if !m.state.DescribeLoading && m.state.DescribeParamName != "" {
-			return m, m.copyValue(m.state.DescribeParamName)
+			return m, m.copyResourceValue(m.state.DescribeIdentity, m.state.DescribeGeneration, m.state.DescribeParamName, aws.ValueText)
 		}
 		return m, nil
 
 	case "e":
 		// Edit parameter
 		if !m.state.DescribeLoading && m.state.DescribeParamName != "" {
-			return m, m.editSecret(m.state.DescribeParamName)
+			if blocked, next := m.blockSecretsManagerMutation(m.state.DescribeIdentity, "edit"); blocked {
+				return next, nil
+			}
+			return m, m.editSecret(m.state.DescribeIdentity, m.state.DescribeParamName)
 		}
 		return m, nil
 
@@ -1134,6 +1583,9 @@ func (m Model) handleDescribeKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.state.HistoryIndex++
 		} else {
 			m.state.HistoryIndex = 0
+		}
+		if m.state.DescribeIdentity.Backend == aws.BackendSecretsManager {
+			m.state.DescribeSelectionChanged = true
 		}
 		// Update value and trigger lazy load if needed
 		return m.updateSelectedVersion()
@@ -1148,6 +1600,9 @@ func (m Model) handleDescribeKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		} else {
 			m.state.HistoryIndex = len(m.state.DescribeHistory) - 1
 		}
+		if m.state.DescribeIdentity.Backend == aws.BackendSecretsManager {
+			m.state.DescribeSelectionChanged = true
+		}
 		// Update value and trigger lazy load if needed
 		return m.updateSelectedVersion()
 
@@ -1155,6 +1610,9 @@ func (m Model) handleDescribeKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// Jump to latest version (go to latest)
 		if m.state.HistoryIndex != 0 {
 			m.state.HistoryIndex = 0
+			if m.state.DescribeIdentity.Backend == aws.BackendSecretsManager {
+				m.state.DescribeSelectionChanged = true
+			}
 			// Update value and trigger lazy load if needed
 			return m.updateSelectedVersion()
 		}
@@ -1187,6 +1645,9 @@ func (m Model) handleDescribeKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case "a":
+		if blocked, next := m.blockSecretsManagerMutation(m.state.DescribeIdentity, "label"); blocked {
+			return next, nil
+		}
 		// Add label to current version
 		if len(m.state.DescribeHistory) > 0 {
 			m.state.LabelInputActive = true
@@ -1199,6 +1660,9 @@ func (m Model) handleDescribeKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case "r":
+		if blocked, next := m.blockSecretsManagerMutation(m.state.DescribeIdentity, "label"); blocked {
+			return next, nil
+		}
 		// Remove label from current version
 		if len(m.state.DescribeHistory) > 0 && m.state.HistoryIndex < len(m.state.DescribeHistory) {
 			entry := m.state.DescribeHistory[m.state.HistoryIndex]
@@ -1216,6 +1680,9 @@ func (m Model) handleDescribeKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case "m":
+		if blocked, next := m.blockSecretsManagerMutation(m.state.DescribeIdentity, "label"); blocked {
+			return next, nil
+		}
 		// Move label to current version
 		if len(m.state.DescribeHistory) > 0 {
 			// Collect all unique labels from all versions
@@ -1243,6 +1710,9 @@ func (m Model) handleDescribeKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case "T":
+		if blocked, next := m.blockSecretsManagerMutation(m.state.DescribeIdentity, "tag"); blocked {
+			return next, nil
+		}
 		// Add tag to parameter
 		if m.state.DescribeEntry != nil {
 			m.state.TagInputActive = true
@@ -1255,6 +1725,9 @@ func (m Model) handleDescribeKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case "D":
+		if blocked, next := m.blockSecretsManagerMutation(m.state.DescribeIdentity, "tag"); blocked {
+			return next, nil
+		}
 		// Remove tag from parameter
 		if m.state.DescribeEntry != nil && len(m.state.DescribeEntry.Tags) > 0 {
 			var keys []string
@@ -1292,6 +1765,10 @@ func (m Model) handleDescribeKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 // updateSelectedVersion updates the displayed value and triggers lazy loading if needed
 func (m Model) updateSelectedVersion() (tea.Model, tea.Cmd) {
 	if m.state.HistoryIndex < 0 || m.state.HistoryIndex >= len(m.state.DescribeHistory) {
+		if m.state.DescribeIdentity.Backend == aws.BackendSecretsManager && !m.state.DescribeMasked {
+			m.state.DescribeLoading = true
+			return m, m.loadSecretValue(m.state.DescribeIdentity, "", false, m.state.DescribeGeneration)
+		}
 		return m, nil
 	}
 
@@ -1312,7 +1789,23 @@ func (m Model) updateSelectedVersion() (tea.Model, tea.Cmd) {
 	if entry.ValueLoaded {
 		// Value already loaded, just update display
 		m.state.DescribeValue = entry.Value
+		m.state.DescribeValueKind = entry.ValueKind
+		m.state.DescribeValueVersionID = entry.VersionID
+		if m.state.DescribeValueKind == "" {
+			m.state.DescribeValueKind = aws.ValueText
+		}
 		return m, nil
+	}
+	if m.state.DescribeIdentity.Backend == aws.BackendSecretsManager {
+		m.state.DescribeValue = ""
+		m.state.DescribeValueKind = ""
+		m.state.DescribeValueVersionID = ""
+		if m.state.DescribeMasked {
+			m.state.DescribeLoading = false
+			return m, nil
+		}
+		m.state.DescribeLoading = true
+		return m, m.loadSecretValue(m.state.DescribeIdentity, entry.VersionID, false, m.state.DescribeGeneration)
 	}
 
 	// Value not loaded, show loading message and trigger fetch
@@ -1422,12 +1915,15 @@ func (m *Model) updatePathSuggestions() {
 
 // filterEntries filters and sorts entries based on search query, type filter, and sort order
 func (m *Model) filterEntries() {
-	selectedName := ""
+	selectedIdentity := aws.ResourceIdentity{}
 	if entry := m.getSelectedEntry(); entry != nil {
-		selectedName = entry.Name
+		selectedIdentity = entry.Identity
 	}
 	var filtered []cache.CacheEntry
 	for _, e := range m.state.Entries {
+		if m.state.BackendFilter != "" && m.state.BackendFilter != aws.BackendAll && e.Identity.Backend != m.state.BackendFilter {
+			continue
+		}
 		// Apply search filter
 		if m.state.SearchQuery != "" && !matchSearch(m.state.SearchQuery, e.Name) {
 			continue
@@ -1438,7 +1934,7 @@ func (m *Model) filterEntries() {
 		}
 		filtered = append(filtered, e)
 	}
-	if m.state.SearchQuery == "" && m.state.FilterType == FilterAll {
+	if m.state.SearchQuery == "" && m.state.FilterType == FilterAll && (m.state.BackendFilter == "" || m.state.BackendFilter == aws.BackendAll) {
 		m.state.FilteredItems = m.state.Entries
 	} else {
 		m.state.FilteredItems = filtered
@@ -1448,17 +1944,17 @@ func (m *Model) filterEntries() {
 	// Apply sorting
 	m.sortEntries()
 	m.buildTree()
-	if selectedName != "" {
+	if selectedIdentity != (aws.ResourceIdentity{}) {
 		if m.state.Mode == ViewModeTree {
 			for i, n := range m.state.TreeNodes {
-				if !n.IsDir && n.Path == selectedName {
+				if !n.IsDir && n.Identity == selectedIdentity {
 					m.state.SelectedIndex = i
 					break
 				}
 			}
 		} else {
 			for i := range m.state.FilteredItems {
-				if m.state.FilteredItems[i].Name == selectedName {
+				if m.state.FilteredItems[i].Identity == selectedIdentity {
 					m.state.SelectedIndex = i
 					break
 				}
@@ -1489,7 +1985,8 @@ func (m *Model) sortEntries() {
 	case SortByName:
 		for i := 0; i < len(m.state.FilteredItems)-1; i++ {
 			for j := i + 1; j < len(m.state.FilteredItems); j++ {
-				less := m.state.FilteredItems[j].Name < m.state.FilteredItems[i].Name
+				left, right := m.state.FilteredItems[j], m.state.FilteredItems[i]
+				less := left.Name < right.Name || left.Name == right.Name && left.Identity.Backend < right.Identity.Backend
 				if asc == less {
 					m.state.FilteredItems[i], m.state.FilteredItems[j] = m.state.FilteredItems[j], m.state.FilteredItems[i]
 				}
@@ -1612,63 +2109,72 @@ func (m *Model) buildTree() {
 }
 
 // loadDescribe loads describe data for a parameter
-func (m Model) loadDescribe(name string, generation uint64) tea.Cmd {
+func (m Model) loadDescribe(identity aws.ResourceIdentity, name string, generation uint64) tea.Cmd {
+	metadata, metadataCached := m.secretMetadata[identity]
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 
 		// Validate parameter name
 		if name == "" {
-			return errorMsg("Invalid parameter name")
+			return resourceErrorMsg{identity: identity, generation: generation, message: "invalid resource name"}
+		}
+		if identity.Backend == aws.BackendSecretsManager {
+			if m.secrets == nil {
+				return secretDetailLoadedMsg{identity: identity, generation: generation, err: fmt.Errorf("SM provider is unavailable")}
+			}
+			if !metadataCached {
+				secrets, err := m.secrets.ListSecrets(ctx)
+				if err != nil {
+					return secretDetailLoadedMsg{identity: identity, generation: generation, err: err}
+				}
+				for _, candidate := range secrets {
+					if candidate.Identity == identity {
+						metadata, metadataCached = candidate, true
+						break
+					}
+				}
+				if !metadataCached {
+					return secretDetailLoadedMsg{identity: identity, generation: generation, err: fmt.Errorf("secret metadata not found")}
+				}
+			}
+			versions, err := m.secrets.ListSecretVersionIds(ctx, identity.CanonicalID)
+			return secretDetailLoadedMsg{identity: identity, generation: generation, metadata: metadata, versions: versions, err: err}
 		}
 
-		// Values are explicitly requested only for the current version. History
-		// begins as metadata, so ciphertext can never be displayed as plaintext.
-		decrypt := m.config != nil && m.config.DecryptByDefault
-		param, err := m.client.GetParameter(ctx, name, decrypt)
+		// Parameter detail is metadata-only. Values are loaded by reveal/copy.
+		param, err := m.client.GetParameterMetadata(ctx, name)
 		if err != nil {
 			// Check if it's an auth/network error
 			errMsg := err.Error()
 			if strings.Contains(errMsg, "auth") || strings.Contains(errMsg, "credential") ||
 				strings.Contains(errMsg, "unauthorized") || strings.Contains(errMsg, "connection") ||
 				strings.Contains(errMsg, "network") {
-				return errorMsg("Unable to retrieve secret value. Check your AWS credentials and network connection.")
+				return resourceErrorMsg{identity: identity, generation: generation, message: "unable to retrieve value; check AWS credentials and network connection"}
 			}
-			return errorMsg("Failed to load parameter: " + err.Error())
+			return resourceErrorMsg{identity: identity, generation: generation, message: "failed to load parameter: " + err.Error()}
 		}
 
 		var historyEntries []HistoryEntry
 
 		allVersions, err := m.client.GetParameterHistory(ctx, name, 50, false)
 		if err != nil {
-			value := ""
-			if decrypt {
-				value = param.Value
-			}
-			return describeLoadedMsg{name: name, generation: generation, value: value, history: []HistoryEntry{{Version: param.Version, Value: value, Modified: param.LastModifiedDate.Format(time.RFC3339), ValueLoaded: decrypt}}}
+			return describeLoadedMsg{name: name, identity: identity, generation: generation, history: []HistoryEntry{{Version: param.Version, Modified: param.LastModifiedDate.Format(time.RFC3339)}}}
 		}
 		for _, h := range allVersions {
 			historyEntries = append(historyEntries, HistoryEntry{Version: h.Version, Modified: h.LastModifiedDate.Format(time.RFC3339), Labels: h.Labels})
 		}
 
-		// The newest history record is the selected value. Mark precisely that
-		// version loaded; service ordering is normalized below.
 		sort.Slice(historyEntries, func(i, j int) bool { return historyEntries[i].Version > historyEntries[j].Version })
-		for i := range historyEntries {
-			if decrypt && historyEntries[i].Version == param.Version {
-				historyEntries[i].Value, historyEntries[i].ValueLoaded = param.Value, true
-				break
-			}
-		}
-		return describeLoadedMsg{name: name, generation: generation,
-			value:   param.Value,
+		return describeLoadedMsg{name: name, identity: identity, generation: generation,
 			history: historyEntries,
 		}
 	}
 }
 
 // copySecret copies secret value to clipboard
-func (m Model) copySecret(name string) tea.Cmd {
+func (m Model) copySecret(identity aws.ResourceIdentity, name string) tea.Cmd {
+	generation := m.state.DescribeGeneration
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
@@ -1680,33 +2186,75 @@ func (m Model) copySecret(name string) tea.Cmd {
 			if strings.Contains(errMsg, "auth") || strings.Contains(errMsg, "credential") ||
 				strings.Contains(errMsg, "unauthorized") || strings.Contains(errMsg, "connection") ||
 				strings.Contains(errMsg, "network") {
-				return errorMsg("Unable to retrieve secret value. Check your AWS credentials and network connection.")
+				return parameterValueLoadedMsg{identity: identity, generation: generation, err: fmt.Errorf("unable to retrieve value; check AWS credentials and network connection")}
 			}
-			return errorMsg("Failed to get secret: " + err.Error())
+			return parameterValueLoadedMsg{identity: identity, generation: generation, err: err}
 		}
-
-		msg, err := m.clipboard.CopyWithMessage(param.Value)
-		if err != nil {
-			return errorMsg("Failed to copy: " + err.Error())
-		}
-
-		return statusMsg(msg)
+		return parameterValueLoadedMsg{identity: identity, generation: generation, value: param.Value}
 	}
 }
 
-// copyValue copies a value to clipboard
-func (m Model) copyValue(value string) tea.Cmd {
-	return func() tea.Msg {
-		msg, err := m.clipboard.CopyWithMessage(value)
-		if err != nil {
-			return errorMsg("Failed to copy: " + err.Error())
+func (m Model) loadSelectedSecretValue(copyValue bool) tea.Cmd {
+	if m.state.HistoryIndex < 0 || m.state.HistoryIndex >= len(m.state.DescribeHistory) {
+		if m.state.DescribeIdentity.Backend == aws.BackendSecretsManager {
+			return m.loadSecretValue(m.state.DescribeIdentity, "", copyValue, m.state.DescribeGeneration)
 		}
-		return statusMsg(msg)
+		return nil
+	}
+	return m.loadSecretValue(m.state.DescribeIdentity, m.state.DescribeHistory[m.state.HistoryIndex].VersionID, copyValue, m.state.DescribeGeneration)
+}
+
+func (m Model) selectedSecretVersionID() string {
+	if m.state.HistoryIndex < 0 || m.state.HistoryIndex >= len(m.state.DescribeHistory) {
+		return ""
+	}
+	return m.state.DescribeHistory[m.state.HistoryIndex].VersionID
+}
+
+func hasStage(entry HistoryEntry, stage string) bool {
+	for _, label := range entry.Labels {
+		if label == stage {
+			return true
+		}
+	}
+	return false
+}
+
+func (m Model) loadSecretValue(identity aws.ResourceIdentity, versionID string, copyValue bool, generation uint64) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if m.secrets == nil {
+			return secretValueLoadedMsg{identity: identity, generation: generation, requestedVersionID: versionID, versionID: versionID, copy: copyValue, err: fmt.Errorf("SM provider is unavailable")}
+		}
+		detail, err := m.secrets.GetSecretValue(ctx, identity.CanonicalID, aws.SecretValueSelector{VersionID: versionID})
+		if err != nil {
+			return secretValueLoadedMsg{identity: identity, generation: generation, requestedVersionID: versionID, versionID: versionID, copy: copyValue, err: err}
+		}
+		if detail.Identity != identity {
+			return secretValueLoadedMsg{identity: identity, generation: generation, requestedVersionID: versionID, versionID: versionID, copy: copyValue, err: fmt.Errorf("provider returned a different qualified identity")}
+		}
+		selectedVersion := versionID
+		if selectedVersion == "" {
+			selectedVersion = detail.VersionID
+		}
+		return secretValueLoadedMsg{identity: identity, generation: generation, requestedVersionID: versionID, versionID: selectedVersion, value: detail.Value, copy: copyValue}
+	}
+}
+
+func (m Model) copyResourceValue(identity aws.ResourceIdentity, generation uint64, value string, kind aws.ValueKind) tea.Cmd {
+	return func() tea.Msg {
+		message, err := m.clipboard.CopyWithMessage(value)
+		if err != nil {
+			return resourceErrorMsg{identity: identity, generation: generation, message: "copy failed: " + err.Error()}
+		}
+		return resourceStatusMsg{identity: identity, generation: generation, message: fmt.Sprintf("copied %s value (%s)", kind, message)}
 	}
 }
 
 // editSecret opens an editor to edit the parameter
-func (m Model) editSecret(name string) tea.Cmd {
+func (m Model) editSecret(identity aws.ResourceIdentity, name string) tea.Cmd {
+	generation := m.state.DescribeGeneration
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
@@ -1714,11 +2262,11 @@ func (m Model) editSecret(name string) tea.Cmd {
 		// Get current value
 		param, err := m.client.GetParameter(ctx, name, true)
 		if err != nil {
-			return editPreparedMsg{err: fmt.Errorf("failed to get parameter: %w", err)}
+			return editPreparedMsg{identity: identity, generation: generation, err: fmt.Errorf("failed to get parameter: %w", err)}
 		}
 		metadata, err := m.client.GetParameterMetadata(ctx, param.Name)
 		if err != nil {
-			return editPreparedMsg{err: fmt.Errorf("failed to read parameter protection metadata: %w", err)}
+			return editPreparedMsg{identity: identity, generation: generation, err: fmt.Errorf("failed to read parameter protection metadata: %w", err)}
 		}
 		param.KMSKeyID, param.Description, param.Tier = metadata.KMSKeyID, metadata.Description, metadata.Tier
 		param.AllowedPattern, param.Policies, param.DataType = metadata.AllowedPattern, metadata.Policies, metadata.DataType
@@ -1736,18 +2284,19 @@ func (m Model) editSecret(name string) tea.Cmd {
 		editor := util.NewEditor(util.EditorConfig{})
 		session, err := editor.Prepare(param.Value, ext)
 		if err != nil {
-			return editPreparedMsg{err: fmt.Errorf("editor error: %w", err)}
+			return editPreparedMsg{identity: identity, generation: generation, err: fmt.Errorf("editor error: %w", err)}
 		}
-		return editPreparedMsg{name: name, original: *param, session: session}
+		return editPreparedMsg{identity: identity, generation: generation, name: name, original: *param, session: session}
 	}
 }
 
 // initiateDelete starts the delete confirmation flow
-func (m *Model) initiateDelete(name string) tea.Cmd {
+func (m *Model) initiateDelete(identity aws.ResourceIdentity, name string) tea.Cmd {
 	m.state.Confirm = ConfirmState{
 		Active:      true,
 		Action:      "delete",
 		Target:      name,
+		Identity:    identity,
 		ConfirmText: "delete me",
 	}
 
@@ -1755,27 +2304,29 @@ func (m *Model) initiateDelete(name string) tea.Cmd {
 }
 
 // deleteSecret performs the actual deletion
-func (m Model) deleteSecret(name string) tea.Cmd {
+func (m Model) deleteSecret(identity aws.ResourceIdentity, name string) tea.Cmd {
+	generation := m.state.DescribeGeneration
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 
 		err := m.client.DeleteParameter(ctx, name)
 		if err != nil {
-			return deleteCompleteMsg{name: name, err: err}
+			return deleteCompleteMsg{identity: identity, generation: generation, name: name, err: err}
 		}
 
-		return deleteCompleteMsg{name: name}
+		return deleteCompleteMsg{identity: identity, generation: generation, name: name}
 	}
 }
 
 // moveSecret moves/renames a parameter
-func (m Model) moveSecret(source, target string) tea.Cmd {
+func (m Model) moveSecret(identity aws.ResourceIdentity, source, target string) tea.Cmd {
+	generation := m.state.DescribeGeneration
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 		result, err := m.client.Transfer(ctx, aws.TransferInput{Source: source, Destination: target, Move: true})
-		msg := moveCompleteMsg{source: source, target: target, destination: result.Destination, err: err}
+		msg := moveCompleteMsg{identity: identity, generation: generation, source: source, target: target, destination: result.Destination, err: err}
 		if result.DestinationWritten && !result.SourceDeleted {
 			msg.warning = "destination was created; source was retained: " + err.Error()
 			msg.err = nil
@@ -1785,12 +2336,13 @@ func (m Model) moveSecret(source, target string) tea.Cmd {
 }
 
 // copySecretAs copies a parameter to a new name
-func (m Model) copySecretAs(source, target string) tea.Cmd {
+func (m Model) copySecretAs(identity aws.ResourceIdentity, source, target string) tea.Cmd {
+	generation := m.state.DescribeGeneration
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 		result, err := m.client.Transfer(ctx, aws.TransferInput{Source: source, Destination: target})
-		return copyCompleteMsg{source: source, target: target, destination: result.Destination, err: err}
+		return copyCompleteMsg{identity: identity, generation: generation, source: source, target: target, destination: result.Destination, err: err}
 	}
 }
 
@@ -1807,9 +2359,9 @@ func (m Model) handleConfirmKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case "delete":
 			// For delete, check confirmation text
 			if m.state.Confirm.Input == m.state.Confirm.ConfirmText {
-				name := m.state.Confirm.Target
+				name, identity := m.state.Confirm.Target, m.state.Confirm.Identity
 				m.state.Confirm = ConfirmState{}
-				return m, m.deleteSecret(name)
+				return m, m.deleteSecret(identity, name)
 			}
 			m.state.Confirm.ErrorMsg = "Incorrect confirmation text"
 			return m, nil
@@ -1819,20 +2371,20 @@ func (m Model) handleConfirmKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.state.Confirm.ErrorMsg = "Target name cannot be empty"
 				return m, nil
 			}
-			source := m.state.Confirm.Target
+			source, identity := m.state.Confirm.Target, m.state.Confirm.Identity
 			target := m.state.Confirm.Input
 			m.state.Confirm = ConfirmState{}
-			return m, m.moveSecret(source, target)
+			return m, m.moveSecret(identity, source, target)
 		case "copy":
 			// For copy, target is the new name
 			if m.state.Confirm.Input == "" {
 				m.state.Confirm.ErrorMsg = "Target name cannot be empty"
 				return m, nil
 			}
-			source := m.state.Confirm.Target
+			source, identity := m.state.Confirm.Target, m.state.Confirm.Identity
 			target := m.state.Confirm.Input
 			m.state.Confirm = ConfirmState{}
-			return m, m.copySecretAs(source, target)
+			return m, m.copySecretAs(identity, source, target)
 		}
 		return m, nil
 
@@ -1855,7 +2407,7 @@ func (m Model) handleConfirmKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 // loadVersionValues loads values for specific versions
 func (m Model) loadVersionValues(paramName string, versions []int64) tea.Cmd {
-	generation := m.state.DescribeGeneration
+	identity, generation := m.state.DescribeIdentity, m.state.DescribeGeneration
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
@@ -1864,11 +2416,11 @@ func (m Model) loadVersionValues(paramName string, versions []int64) tea.Cmd {
 		for _, version := range versions {
 			param, err := m.client.GetParameterByVersion(ctx, paramName, version, true)
 			if err != nil {
-				return errorMsg("Failed to load version value: " + err.Error())
+				return resourceErrorMsg{identity: identity, generation: generation, message: "failed to load version value: " + err.Error()}
 			}
 			versionMap[version] = param.Value
 		}
-		return versionValuesLoadedMsg{name: paramName, generation: generation, versions: versionMap}
+		return versionValuesLoadedMsg{name: paramName, identity: identity, generation: generation, versions: versionMap}
 	}
 }
 
@@ -1996,13 +2548,14 @@ func (m *Model) updateLabelSuggestions() {
 
 // executeLabelAction performs the label operation
 func (m Model) executeLabelAction(action, label string, version int64) tea.Cmd {
+	identity, generation := m.state.DescribeIdentity, m.state.DescribeGeneration
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 
 		paramName := m.state.DescribeParamName
 		if paramName == "" {
-			return labelCompleteMsg{action: action, err: fmt.Errorf("no parameter selected")}
+			return labelCompleteMsg{identity: identity, generation: generation, action: action, err: fmt.Errorf("no parameter selected")}
 		}
 
 		switch action {
@@ -2014,15 +2567,16 @@ func (m Model) executeLabelAction(action, label string, version int64) tea.Cmd {
 			}
 			output, err := m.client.LabelParameterVersion(ctx, input)
 			if err != nil {
-				return labelCompleteMsg{action: action, err: err}
+				return labelCompleteMsg{identity: identity, generation: generation, action: action, err: err}
 			}
 			if len(output.InvalidLabels) > 0 {
 				return labelCompleteMsg{
+					identity: identity, generation: generation,
 					action: action,
 					err:    fmt.Errorf("invalid labels: %v", output.InvalidLabels),
 				}
 			}
-			return labelCompleteMsg{action: action, label: label, version: version}
+			return labelCompleteMsg{identity: identity, generation: generation, action: action, label: label, version: version}
 
 		case "remove":
 			input := &aws.UnlabelParameterInput{
@@ -2032,9 +2586,9 @@ func (m Model) executeLabelAction(action, label string, version int64) tea.Cmd {
 			}
 			err := m.client.UnlabelParameterVersion(ctx, input)
 			if err != nil {
-				return labelCompleteMsg{action: action, err: err}
+				return labelCompleteMsg{identity: identity, generation: generation, action: action, err: err}
 			}
-			return labelCompleteMsg{action: action, label: label, version: version}
+			return labelCompleteMsg{identity: identity, generation: generation, action: action, label: label, version: version}
 
 		case "move":
 			// Moving a label is just adding it to the new version
@@ -2046,12 +2600,12 @@ func (m Model) executeLabelAction(action, label string, version int64) tea.Cmd {
 			}
 			_, err := m.client.LabelParameterVersion(ctx, input)
 			if err != nil {
-				return labelCompleteMsg{action: action, err: err}
+				return labelCompleteMsg{identity: identity, generation: generation, action: action, err: err}
 			}
-			return labelCompleteMsg{action: action, label: label, version: version}
+			return labelCompleteMsg{identity: identity, generation: generation, action: action, label: label, version: version}
 		}
 
-		return labelCompleteMsg{action: action, err: fmt.Errorf("unknown action: %s", action)}
+		return labelCompleteMsg{identity: identity, generation: generation, action: action, err: fmt.Errorf("unknown action: %s", action)}
 	}
 }
 
@@ -2110,13 +2664,14 @@ func (m Model) handleTagInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 // executeTagAction performs the tag add/remove operation
 func (m Model) executeTagAction(action, input string) tea.Cmd {
+	identity, generation := m.state.DescribeIdentity, m.state.DescribeGeneration
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 
 		paramName := m.state.DescribeParamName
 		if paramName == "" {
-			return tagCompleteMsg{action: action, err: fmt.Errorf("no parameter selected")}
+			return tagCompleteMsg{identity: identity, generation: generation, action: action, err: fmt.Errorf("no parameter selected")}
 		}
 
 		switch action {
@@ -2124,57 +2679,57 @@ func (m Model) executeTagAction(action, input string) tea.Cmd {
 			// Parse key=value
 			parts := strings.SplitN(input, "=", 2)
 			if len(parts) != 2 || parts[0] == "" {
-				return tagCompleteMsg{action: action, err: fmt.Errorf("format must be key=value")}
+				return tagCompleteMsg{identity: identity, generation: generation, action: action, err: fmt.Errorf("format must be key=value")}
 			}
 			key, value := strings.TrimSpace(parts[0]), strings.TrimSpace(parts[1])
 			err := m.client.AddTagsToResource(ctx, paramName, map[string]string{key: value})
 			if err != nil {
-				return tagCompleteMsg{action: action, err: err}
+				return tagCompleteMsg{identity: identity, generation: generation, action: action, err: err}
 			}
-			return tagCompleteMsg{action: "add", key: key}
+			return tagCompleteMsg{identity: identity, generation: generation, action: "add", key: key}
 
 		case "remove":
 			key := strings.TrimSpace(input)
 			err := m.client.RemoveTagsFromResource(ctx, paramName, []string{key})
 			if err != nil {
-				return tagCompleteMsg{action: action, err: err}
+				return tagCompleteMsg{identity: identity, generation: generation, action: action, err: err}
 			}
-			return tagCompleteMsg{action: "remove", key: key}
+			return tagCompleteMsg{identity: identity, generation: generation, action: "remove", key: key}
 		}
 
-		return tagCompleteMsg{action: action, err: fmt.Errorf("unknown action: %s", action)}
+		return tagCompleteMsg{identity: identity, generation: generation, action: action, err: fmt.Errorf("unknown action: %s", action)}
 	}
 }
 
 // refreshTags refreshes tags for the current parameter
 func (m Model) refreshTags() tea.Cmd {
-	name, generation := m.state.DescribeParamName, m.state.DescribeGeneration
+	name, identity, generation := m.state.DescribeParamName, m.state.DescribeIdentity, m.state.DescribeGeneration
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 
 		tags, err := m.client.GetParameterTags(ctx, name)
 		if err != nil {
-			return errorMsg(fmt.Sprintf("Failed to refresh tags: %v", err))
+			return resourceErrorMsg{identity: identity, generation: generation, message: fmt.Sprintf("failed to refresh tags: %v", err)}
 		}
 
-		return tagsRefreshMsg{name: name, generation: generation, tags: tags}
+		return tagsRefreshMsg{name: name, identity: identity, generation: generation, tags: tags}
 	}
 }
 
 // refreshHistory refreshes the parameter history to show updated labels
 func (m Model) refreshHistory() tea.Cmd {
-	name, generation := m.state.DescribeParamName, m.state.DescribeGeneration
+	name, identity, generation := m.state.DescribeParamName, m.state.DescribeIdentity, m.state.DescribeGeneration
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 
 		history, err := m.client.GetParameterHistory(ctx, name, 50, false)
 		if err != nil {
-			return errorMsg(fmt.Sprintf("Failed to refresh history: %v", err))
+			return resourceErrorMsg{identity: identity, generation: generation, message: fmt.Sprintf("failed to refresh history: %v", err)}
 		}
 
-		return historyRefreshMsg{name: name, generation: generation, history: history}
+		return historyRefreshMsg{name: name, identity: identity, generation: generation, history: history}
 	}
 }
 

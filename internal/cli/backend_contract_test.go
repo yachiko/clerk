@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/spf13/cobra"
 	"github.com/yachiko/clerk/internal/aws"
 	"github.com/yachiko/clerk/internal/cache"
 )
@@ -20,6 +21,26 @@ func TestBackendFlagDefaultsToAll(t *testing.T) {
 	flag := root.PersistentFlags().Lookup("backend")
 	if flag == nil || flag.DefValue != "all" || globalOpts.Backend != "all" {
 		t.Fatalf("backend flag = %#v, value %q", flag, globalOpts.Backend)
+	}
+}
+
+func TestRefreshKeepsSSMCompatibilityDefault(t *testing.T) {
+	t.Cleanup(func() { globalOpts = GlobalOptions{} })
+	globalOpts = GlobalOptions{}
+	root := NewRootCommand("test", "", "")
+	var refreshCmd *cobra.Command
+	for _, command := range root.Commands() {
+		if command.Name() == "refresh" {
+			refreshCmd = command
+			break
+		}
+	}
+	if refreshCmd == nil {
+		t.Fatal("refresh command not found")
+	}
+	backend, err := refreshBackend(refreshCmd)
+	if err != nil || backend != aws.BackendSSM {
+		t.Fatalf("refresh backend = %q, err=%v", backend, err)
 	}
 }
 
@@ -35,7 +56,7 @@ func TestDirectAndMutationBackendValidationRunsBeforeAWS(t *testing.T) {
 		{[]string{"delete", "/x", "--force", "--backend", "secretsmanager"}, "delete is supported only with --backend ssm"},
 		{[]string{"cp", "/x", "/y", "--backend", "all"}, "cp is supported only with --backend ssm"},
 		{[]string{"mv", "/x", "/y", "--force", "--backend", "secretsmanager"}, "mv is supported only with --backend ssm"},
-		{[]string{"refresh"}, "refresh requires one concrete backend"},
+		{[]string{"refresh", "--backend", "all"}, "refresh requires one concrete backend"},
 	}
 	for _, test := range tests {
 		globalOpts = GlobalOptions{}

@@ -57,6 +57,9 @@ func buildNodesRecursive(dir *dirInfo, path string, depth int, expanded map[stri
 
 	// Sort entry names
 	sort.Slice(dir.entries, func(i, j int) bool {
+		if dir.entries[i].Name == dir.entries[j].Name {
+			return dir.entries[i].Identity.Backend < dir.entries[j].Identity.Backend
+		}
 		return dir.entries[i].Name < dir.entries[j].Name
 	})
 
@@ -89,11 +92,12 @@ func buildNodesRecursive(dir *dirInfo, path string, depth int, expanded map[stri
 		name := parts[len(parts)-1]
 
 		*nodes = append(*nodes, TreeNode{
-			Name:  name,
-			Path:  entry.Name,
-			IsDir: false,
-			Depth: depth,
-			Entry: entry,
+			Name:     name,
+			Path:     entry.Identity.CanonicalID,
+			Identity: entry.Identity,
+			IsDir:    false,
+			Depth:    depth,
+			Entry:    entry,
 		})
 	}
 }
