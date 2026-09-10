@@ -119,6 +119,27 @@ func TestSSMTreeNavigationAndNarrowRenderingAreSafe(t *testing.T) {
 	_ = m.renderBrowseView()
 }
 
+func TestResourceViewsUseSharedScopeTitle(t *testing.T) {
+	scope := resourceID(aws.BackendSSM, "/secret")
+	title := "Clerk | account 123456789012 | region us-east-1"
+	entry := cache.CacheEntry{Identity: scope, Name: "/secret", Type: "String"}
+	views := []string{
+		Model{scope: scope, state: State{Mode: ViewModeList, Width: 120, Height: 20}}.renderBrowseView(),
+		Model{scope: scope, state: State{Mode: ViewModeTree, Width: 120, Height: 20}}.renderBrowseView(),
+		Model{scope: scope, state: State{Mode: ViewModeDescribe, Width: 120, Height: 20, DescribeEntry: &entry}}.renderDescribeView(),
+	}
+	for _, view := range views {
+		if !strings.Contains(view, title) {
+			t.Fatalf("view missing shared title %q", title)
+		}
+		for _, legacy := range []string{"CLERK -", "DESCRIBE SSM", " LIST ", " TREE "} {
+			if strings.Contains(view, legacy) {
+				t.Fatalf("view contains legacy title text %q", legacy)
+			}
+		}
+	}
+}
+
 func TestSecretsInventoryIsMetadataOnlyAndUsesOneSnapshot(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	id := resourceID(aws.BackendSecretsManager, "arn:secret")
@@ -142,12 +163,12 @@ func TestSecretsViewHasProviderRelevantActionsOnly(t *testing.T) {
 	id := resourceID(aws.BackendSecretsManager, "arn:secret")
 	m := smTestModel(&fakeSecretsManager{}, cache.CacheEntry{Identity: id, Name: "secret"})
 	view := m.View()
-	for _, expected := range []string{"CLERK - LIST", "account 123456789012", "region us-east-1", "ROTATION", "TAGS", "MODIFIED", "new-version", "lifecycle", "restore"} {
+	for _, expected := range []string{"Clerk | account 123456789012 | region us-east-1", "ROTATION", "TAGS", "MODIFIED", "new-version", "lifecycle", "restore"} {
 		if !strings.Contains(view, expected) {
 			t.Fatalf("SM view missing %q", expected)
 		}
 	}
-	for _, unsupported := range []string{"type", "move", "copy-to", "label", "backend"} {
+	for _, unsupported := range []string{"CLERK - LIST", "CLERK - DETAIL", "DESCRIBE SSM", "type", "move", "copy-to", "label", "backend"} {
 		if strings.Contains(view, unsupported) {
 			t.Fatalf("SM view exposes unsupported action %q", unsupported)
 		}
@@ -178,9 +199,21 @@ func TestSecretsRendererMatchesSSMShellAndKeepsSecretPanels(t *testing.T) {
 	m.mode, m.detailIdentity = smDetail, id
 	m.versions = []aws.SecretVersion{{VersionID: "current-version", VersionStages: []string{"AWSCURRENT"}, CreatedDate: &changed}}
 	detail := m.View()
-	for _, expected := range []string{"CLERK - DETAIL", "VERSION HISTORY", "SECRET VALUE", "ARN: arn:secret", "Description: database credentials", "KMS: alias/secrets", "Rotation: enabled", "Tags: env=prod", "current-version", "new-version", "lifecycle"} {
+	for _, expected := range []string{"Clerk | account 123456789012 | region us-east-1", "VERSION HISTORY", "VALUE", "Tags: env=prod", "current-version", "new-version", "lifecycle"} {
 		if !strings.Contains(detail, expected) {
 			t.Fatalf("SM detail missing provider panel or action %q", expected)
+		}
+	}
+	for _, unexpected := range []string{"CLERK - DETAIL", "SECRET VALUE", "ARN: arn:secret", "Description: database credentials", "KMS: alias/secrets", "Rotation: enabled", "Lifecycle:"} {
+		if strings.Contains(detail, unexpected) {
+			t.Fatalf("SM detail has metadata panel clutter %q", unexpected)
+		}
+	}
+	for _, line := range strings.Split(detail, "\n") {
+		if strings.Contains(line, "VERSION HISTORY") || strings.Contains(line, "current-version") || strings.Contains(line, "Press x to reveal") {
+			if strings.HasPrefix(line, "    ") {
+				t.Fatalf("SM panel content has extra indentation: %q", line)
+			}
 		}
 	}
 	if strings.Count(detail, "────────────────") < 2 {

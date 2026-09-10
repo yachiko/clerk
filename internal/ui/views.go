@@ -13,12 +13,6 @@ import (
 
 // Styles
 var (
-	titleStyle = lipgloss.NewStyle().
-			Bold(true).
-			Foreground(lipgloss.Color("86")).
-			Background(lipgloss.Color("236")).
-			Padding(0, 1)
-
 	headerStyle = lipgloss.NewStyle().
 			Bold(true).
 			Foreground(lipgloss.Color("252"))
@@ -124,22 +118,16 @@ func renderHelp(pairs ...string) string {
 	return strings.Join(parts, helpDescStyle.Render("  "))
 }
 
+// renderScopeTitle provides a consistent, unobtrusive context line for resource views.
+func renderScopeTitle(scope aws.ResourceIdentity) string {
+	return dimStyle.Render(fmt.Sprintf("Clerk | account %s | region %s", scope.AccountID, scope.Region))
+}
+
 // renderBrowseView renders the main browse view
 func (m Model) renderBrowseView() string {
 	var lines []string
 
-	// Title bar - full width
-	mode := "LIST"
-	if m.state.Mode == ViewModeTree {
-		mode = "TREE"
-	}
-	titleText := fmt.Sprintf(" CLERK - %s | account %s | region %s ", mode, m.scope.AccountID, m.scope.Region)
-	titlePad := m.state.Width - lipgloss.Width(titleText)
-	if titlePad < 0 {
-		titlePad = 0
-	}
-	title := titleStyle.Render(titleText + strings.Repeat(" ", titlePad))
-	lines = append(lines, title)
+	lines = append(lines, renderScopeTitle(m.scope))
 
 	// Type filter badge (right-aligned)
 	filterBadge := ""
@@ -461,14 +449,7 @@ func (m Model) renderDescribeView() string {
 
 	entry := m.state.DescribeEntry
 
-	// Title - full width
-	titleText := fmt.Sprintf(" DESCRIBE SSM | account %s | region %s ", m.scope.AccountID, m.scope.Region)
-	titlePad := m.state.Width - lipgloss.Width(titleText)
-	if titlePad < 0 {
-		titlePad = 0
-	}
-	title := titleStyle.Render(titleText + strings.Repeat(" ", titlePad))
-	output = append(output, title)
+	output = append(output, renderScopeTitle(m.scope))
 
 	// Empty line (equivalent to search bar in browse view for layout consistency)
 	output = append(output, "")
@@ -643,7 +624,7 @@ func (m Model) renderValuePanel(width, height int) string {
 	var lines []string
 
 	// Header with underline
-	header := panelHeaderStyle.Render("SSM VALUE")
+	header := panelHeaderStyle.Render("VALUE")
 	if m.state.DescribeValueKind != "" {
 		kind := string(m.state.DescribeValueKind)
 		if m.state.DescribeValueKind == aws.ValueBinary {
