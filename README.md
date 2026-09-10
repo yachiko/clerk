@@ -81,6 +81,24 @@ clerk list "/dev/*"
 clerk browse
 ```
 
+### Backends
+
+Clerk uses AWS Systems Manager Parameter Store by default. Pass
+`--backend secretsmanager` to read AWS Secrets Manager secrets with `get`,
+`list`, `refresh`, or `browse`. This initial backend is read-only: `put`,
+`delete`, `cp`, and `mv` are rejected before any AWS write is attempted.
+
+```bash
+clerk get my-secret --backend secretsmanager --stage AWSCURRENT
+clerk get my-secret --backend secretsmanager --version-id 1234abcd
+clerk list --backend secretsmanager
+```
+
+`--stage` and `--version-id` are mutually exclusive. `SecretBinary` values
+are emitted as base64 (including `--value`) and are never copied to the
+clipboard or opened in an editor. Cache files are separated by backend and
+only contain metadata, never secret values.
+
 ## Commands
 
 ### Data Commands
@@ -127,9 +145,10 @@ Configuration is stored in `~/.clerk/config.json`.
 | `browse_refresh_cooldown` | `5m`           | Minimum age for startup refresh                       |
 | `search_slash_prefix` | `true`             | Start interactive search with `/`                     |
 
-Cache files live under `~/.clerk/cache/<account-id>/<region>.json` — separate
-files per AWS account and region, so switching profiles doesn't invalidate
-unrelated caches. The location isn't user-configurable.
+Cache files live under `~/.clerk/cache/<account-id>/`; SSM uses
+`<region>.json` and Secrets Manager uses `<region>.secretsmanager.json`.
+They are separate per AWS account, region, and backend, so same-named values
+cannot collide. The location isn't user-configurable.
 
 Region and profile precedence is command flag, explicitly configured Clerk value,
 then the AWS SDK environment/shared configuration. An unset region produces an

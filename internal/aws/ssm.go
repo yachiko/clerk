@@ -3,6 +3,7 @@ package aws
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -17,6 +18,8 @@ import (
 // Client wraps the AWS SSM client
 type Client struct {
 	ssm              *ssm.Client
+	secretsManager   secretsManagerAPI
+	backend          string
 	sts              *sts.Client
 	region           string
 	accountID        string
@@ -32,6 +35,7 @@ type ClientOptions struct {
 	ProfileSet       bool
 	DescribePageSize int32
 	DescribeMaxItems int32
+	Backend          string
 }
 
 // NewClient creates a new AWS SSM client
@@ -67,18 +71,33 @@ func NewClient(ctx context.Context, opts ClientOptions) (*Client, error) {
 		return nil, fmt.Errorf("failed to get AWS account ID: %w", err)
 	}
 
-	return &Client{
+	backend := opts.Backend
+	if backend == "" {
+		backend = "ssm"
+	}
+	if backend != "ssm" && backend != "secretsmanager" {
+		return nil, fmt.Errorf("unsupported backend %q (valid: ssm, secretsmanager)", backend)
+	}
+	client := &Client{
 		ssm:              ssm.NewFromConfig(cfg),
 		sts:              stsClient,
 		region:           cfg.Region,
 		accountID:        aws.ToString(identity.Account),
 		describePageSize: pageSize,
 		describeMaxItems: opts.DescribeMaxItems,
-	}, nil
+		backend:          backend,
+	}
+	if backend == "secretsmanager" {
+		client.secretsManager = newSecretsManagerClient(cfg)
+	}
+	return client, nil
 }
 
 // GetParameter retrieves a parameter by name
 func (c *Client) GetParameter(ctx context.Context, name string, withDecryption bool) (*Parameter, error) {
+	if c.backend == "secretsmanager" {
+		return c.getSecret(ctx, name, "", "")
+	}
 	input := &ssm.GetParameterInput{
 		Name:           aws.String(name),
 		WithDecryption: aws.Bool(withDecryption),
@@ -107,6 +126,9 @@ func (c *Client) GetParameter(ctx context.Context, name string, withDecryption b
 // retrieving a parameter value. Callers that overwrite existing parameters use
 // it to preserve the existing protection policy.
 func (c *Client) GetParameterMetadata(ctx context.Context, name string) (*Parameter, error) {
+	if c.backend == "secretsmanager" {
+		return nil, errReadOnlySecretsManager
+	}
 	output, err := c.ssm.DescribeParameters(ctx, &ssm.DescribeParametersInput{ParameterFilters: []types.ParameterStringFilter{{Key: aws.String("Name"), Values: []string{name}}}})
 	if err != nil {
 		return nil, fmt.Errorf("failed to describe parameter: %w", err)
@@ -162,6 +184,9 @@ func (c *Client) GetParameterByVersion(ctx context.Context, name string, version
 
 // GetParameterTags retrieves tags for a parameter
 func (c *Client) GetParameterTags(ctx context.Context, name string) (map[string]string, error) {
+	if c.backend == "secretsmanager" {
+		return c.getSecretTags(ctx, name)
+	}
 	input := &ssm.ListTagsForResourceInput{
 		ResourceType: types.ResourceTypeForTaggingParameter,
 		ResourceId:   aws.String(name),
@@ -182,6 +207,9 @@ func (c *Client) GetParameterTags(ctx context.Context, name string) (map[string]
 
 // PutParameter creates or updates a parameter
 func (c *Client) PutParameter(ctx context.Context, input *PutParameterInput) (*PutParameterOutput, error) {
+	if c.backend == "secretsmanager" {
+		return nil, errReadOnlySecretsManager
+	}
 	ssmInput := &ssm.PutParameterInput{
 		Name:      aws.String(input.Name),
 		Value:     aws.String(input.Value),
@@ -243,6 +271,9 @@ func (c *Client) PutParameter(ctx context.Context, input *PutParameterInput) (*P
 // Transfer copies decrypted source bytes and supported destination metadata. It
 // never deletes a destination as rollback; callers receive a partial outcome.
 func (c *Client) Transfer(ctx context.Context, input TransferInput) (TransferResult, error) {
+	if c.backend == "secretsmanager" {
+		return TransferResult{}, errReadOnlySecretsManager
+	}
 	result := TransferResult{}
 	if canonicalParameterName(input.Source) == canonicalParameterName(input.Destination) {
 		return result, fmt.Errorf("source and destination identify the same parameter")
@@ -322,6 +353,9 @@ func canonicalParameterName(name string) string {
 
 // DeleteParameter deletes a parameter
 func (c *Client) DeleteParameter(ctx context.Context, name string) error {
+	if c.backend == "secretsmanager" {
+		return errReadOnlySecretsManager
+	}
 	input := &ssm.DeleteParameterInput{
 		Name: aws.String(name),
 	}
@@ -337,6 +371,9 @@ func (c *Client) DeleteParameter(ctx context.Context, name string) error {
 // GetParameterHistory retrieves all available version history. pageSize controls
 // the service page size only; it is deliberately not a total-result cap.
 func (c *Client) GetParameterHistory(ctx context.Context, name string, pageSize int32, withDecryption bool) ([]ParameterHistory, error) {
+	if c.backend == "secretsmanager" {
+		return nil, errors.New("secret version history is not available for the secretsmanager backend")
+	}
 	if pageSize <= 0 {
 		pageSize = 50
 	}
@@ -374,6 +411,9 @@ func (c *Client) GetParameterHistory(ctx context.Context, name string, pageSize 
 // ListParameters lists metadata only. DescribeParameters avoids returning
 // ordinary String values as an incidental result of inventory browsing.
 func (c *Client) ListParameters(ctx context.Context, path string, recursive bool) ([]ParameterMetadata, error) {
+	if c.backend == "secretsmanager" {
+		return c.listSecrets(ctx, path)
+	}
 	var params []ParameterMetadata
 	_ = recursive // retained for source compatibility
 	input := &ssm.DescribeParametersInput{MaxResults: aws.Int32(c.describePageSize)}
@@ -427,6 +467,9 @@ func (c *Client) ListParametersByPath(ctx context.Context, path string, recursiv
 
 // DescribeAllParameters retrieves metadata for all parameters
 func (c *Client) DescribeAllParameters(ctx context.Context) ([]ParameterMetadata, error) {
+	if c.backend == "secretsmanager" {
+		return c.listSecrets(ctx, "*")
+	}
 	var params []ParameterMetadata
 
 	input := &ssm.DescribeParametersInput{
@@ -460,6 +503,21 @@ func (c *Client) DescribeAllParameters(ctx context.Context) ([]ParameterMetadata
 
 // DescribeParametersStream sends parameters to a channel as they're discovered
 func (c *Client) DescribeParametersStream(ctx context.Context, ch chan<- ParameterMetadata) (DescribeResult, error) {
+	if c.backend == "secretsmanager" {
+		defer close(ch)
+		params, err := c.listSecrets(ctx, "*")
+		if err != nil {
+			return DescribeResult{}, err
+		}
+		for _, p := range params {
+			select {
+			case <-ctx.Done():
+				return DescribeResult{}, ctx.Err()
+			case ch <- p:
+			}
+		}
+		return DescribeResult{Complete: true}, nil
+	}
 	defer close(ch)
 
 	input := &ssm.DescribeParametersInput{
@@ -511,9 +569,17 @@ func (c *Client) GetAccountID() string {
 	return c.accountID
 }
 
+// GetBackend returns the selected secret backend.
+func (c *Client) GetBackend() string {
+	return c.backend
+}
+
 // LabelParameterVersion adds or moves labels to a parameter version
 // If a label already exists on another version, it will be moved
 func (c *Client) LabelParameterVersion(ctx context.Context, input *LabelParameterInput) (*LabelParameterOutput, error) {
+	if c.backend == "secretsmanager" {
+		return nil, errReadOnlySecretsManager
+	}
 	ssmInput := &ssm.LabelParameterVersionInput{
 		Name:             aws.String(input.Name),
 		ParameterVersion: aws.Int64(input.Version),
@@ -533,6 +599,9 @@ func (c *Client) LabelParameterVersion(ctx context.Context, input *LabelParamete
 
 // UnlabelParameterVersion removes labels from a parameter version
 func (c *Client) UnlabelParameterVersion(ctx context.Context, input *UnlabelParameterInput) error {
+	if c.backend == "secretsmanager" {
+		return errReadOnlySecretsManager
+	}
 	ssmInput := &ssm.UnlabelParameterVersionInput{
 		Name:             aws.String(input.Name),
 		ParameterVersion: aws.Int64(input.Version),
@@ -549,6 +618,9 @@ func (c *Client) UnlabelParameterVersion(ctx context.Context, input *UnlabelPara
 
 // AddTagsToResource adds tags to a parameter
 func (c *Client) AddTagsToResource(ctx context.Context, name string, tags map[string]string) error {
+	if c.backend == "secretsmanager" {
+		return errReadOnlySecretsManager
+	}
 	var tagList []types.Tag
 	for k, v := range tags {
 		tagList = append(tagList, types.Tag{
@@ -573,6 +645,9 @@ func (c *Client) AddTagsToResource(ctx context.Context, name string, tags map[st
 
 // RemoveTagsFromResource removes tags from a parameter by key
 func (c *Client) RemoveTagsFromResource(ctx context.Context, name string, tagKeys []string) error {
+	if c.backend == "secretsmanager" {
+		return errReadOnlySecretsManager
+	}
 	input := &ssm.RemoveTagsFromResourceInput{
 		ResourceType: types.ResourceTypeForTaggingParameter,
 		ResourceId:   aws.String(name),

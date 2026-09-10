@@ -45,6 +45,12 @@ var _ = Describe("cache.Manager", func() {
 		})
 	})
 
+	It("uses a separate namespace for Secrets Manager metadata", func() {
+		manager, err := NewManager(&config.Config{CacheTTL: time.Hour}, "us-east-1", "123456789012", "secretsmanager")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(manager.cachePath).To(HaveSuffix("/123456789012/us-east-1.secretsmanager.json"))
+	})
+
 	Describe("IsExpired", func() {
 		It("reports expired when LastRefresh is zero", func() {
 			Expect(mgr.IsExpired()).To(BeTrue())

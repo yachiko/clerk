@@ -19,6 +19,8 @@ import (
 var (
 	getMask      bool
 	getValueOnly bool
+	getStage     string
+	getVersionID string
 )
 
 // InitGetCommand initializes the GET command
@@ -27,6 +29,9 @@ func InitGetCommand() *cobra.Command {
 		Use:   "get <name[@version|:label]>",
 		Short: "Retrieve a secret from AWS Parameter Store",
 		Long: `Retrieve the value of a secret from AWS Parameter Store.
+
+With --backend secretsmanager, use --stage or --version-id to select a
+Secrets Manager version. SecretBinary values are displayed as base64.
 
 By default, the secret is decrypted and displayed. Use --mask to show
 a masked version of the value.
@@ -61,11 +66,16 @@ Examples:
 
 	getCmd.Flags().BoolVar(&getMask, "mask", false, "Show masked value instead of actual value")
 	getCmd.Flags().BoolVar(&getValueOnly, "value", false, "Output only the value (no metadata)")
+	getCmd.Flags().StringVar(&getStage, "stage", "", "Secrets Manager version stage")
+	getCmd.Flags().StringVar(&getVersionID, "version-id", "", "Secrets Manager version ID")
 
 	return getCmd
 }
 
 func runGet(cmd *cobra.Command, args []string) error {
+	if err := validateSecretVersionSelectors(getStage, getVersionID); err != nil {
+		return err
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
@@ -97,6 +107,26 @@ func runGet(cmd *cobra.Command, args []string) error {
 	client, err := aws.NewClient(ctx, awsOpts)
 	if err != nil {
 		return fmt.Errorf("failed to create AWS client: %w", err)
+	}
+
+	if globalOpts.Backend == "secretsmanager" {
+		if version > 0 || label != "" {
+			return fmt.Errorf("SSM @version and :label selectors are not supported with the secretsmanager backend; use --stage or --version-id")
+		}
+		param, err := client.GetSecret(ctx, name, getStage, getVersionID)
+		if err != nil {
+			return fmt.Errorf("failed to get secret: %w", err)
+		}
+		if !getValueOnly {
+			if tags, tagErr := client.GetParameterTags(ctx, param.Name); tagErr == nil {
+				param.Tags = tags
+			}
+		}
+		displayValue := param.Value
+		if getMask {
+			displayValue = util.MaskValue(param.Value)
+		}
+		return outputParameter(param, displayValue)
 	}
 
 	// Get parameter (prioritize label over version)
@@ -143,6 +173,13 @@ func runGet(cmd *cobra.Command, args []string) error {
 
 	// Output
 	return outputParameter(param, displayValue)
+}
+
+func validateSecretVersionSelectors(stage, versionID string) error {
+	if stage != "" && versionID != "" {
+		return fmt.Errorf("--stage and --version-id cannot be used together")
+	}
+	return nil
 }
 
 // parseNameVersionLabel parses "name@version" or "name:label" format
@@ -210,6 +247,7 @@ func outputParameter(param *aws.Parameter, displayValue string) error {
 			Version          int64             `json:"version"`
 			LastModifiedDate time.Time         `json:"last_modified_date"`
 			ARN              string            `json:"arn,omitempty"`
+			VersionID        string            `json:"version_id,omitempty"`
 			Tags             map[string]string `json:"tags,omitempty"`
 		}{
 			Name:             param.Name,
@@ -218,6 +256,7 @@ func outputParameter(param *aws.Parameter, displayValue string) error {
 			Version:          param.Version,
 			LastModifiedDate: param.LastModifiedDate,
 			ARN:              param.ARN,
+			VersionID:        param.VersionID,
 			Tags:             param.Tags,
 		}
 
@@ -249,6 +288,9 @@ func outputParameter(param *aws.Parameter, displayValue string) error {
 
 	if param.ARN != "" {
 		_, _ = cyan.Printf("ARN: %s\n", util.SanitizeTerminal(param.ARN))
+	}
+	if param.VersionID != "" {
+		_, _ = cyan.Printf("Version ID: %s\n", util.SanitizeTerminal(param.VersionID))
 	}
 
 	if len(param.Tags) > 0 {

@@ -27,5 +27,13 @@ func resolveAWSOptions(cmd *cobra.Command, cfg *config.Config) (aws.ClientOption
 	return aws.ClientOptions{
 		Region: region, Profile: profile, ProfileSet: profileSet,
 		DescribePageSize: cfg.DescribePageSize, DescribeMaxItems: cfg.DescribeMaxItems,
+		Backend: globalOpts.Backend,
 	}, nil
+}
+
+func requireWritableBackend() error {
+	if globalOpts.Backend == "secretsmanager" {
+		return fmt.Errorf("the secretsmanager backend is read-only; put, delete, cp, and mv are not supported")
+	}
+	return nil
 }

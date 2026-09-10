@@ -2,7 +2,7 @@ package aws
 
 import "time"
 
-// Parameter represents a secret/parameter from AWS Parameter Store
+// Parameter represents a secret/parameter from the selected AWS backend.
 type Parameter struct {
 	Name             string            `json:"name"`
 	Value            string            `json:"value,omitempty"`
@@ -17,6 +17,8 @@ type Parameter struct {
 	Tier             string            `json:"tier,omitempty"`
 	AllowedPattern   string            `json:"allowed_pattern,omitempty"`
 	Policies         string            `json:"policies,omitempty"`
+	VersionID        string            `json:"version_id,omitempty"`
+	Binary           bool              `json:"binary,omitempty"`
 }
 
 // ParameterMetadata represents metadata without the value

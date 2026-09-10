@@ -50,6 +50,9 @@ Examples:
 }
 
 func runDelete(cmd *cobra.Command, args []string) error {
+	if err := requireWritableBackend(); err != nil {
+		return err
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
@@ -104,7 +107,7 @@ func runDelete(cmd *cobra.Command, args []string) error {
 	}
 
 	// Remove from cache with region and account ID
-	cacheMgr, err := cache.NewManager(cfg, client.GetRegion(), client.GetAccountID())
+	cacheMgr, err := cache.NewManager(cfg, client.GetRegion(), client.GetAccountID(), client.GetBackend())
 	if err == nil {
 		_ = cacheMgr.Delete(name)
 	}

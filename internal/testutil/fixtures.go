@@ -11,6 +11,8 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
+	"github.com/aws/aws-sdk-go-v2/service/secretsmanager"
+	secretsmanagertypes "github.com/aws/aws-sdk-go-v2/service/secretsmanager/types"
 	"github.com/aws/aws-sdk-go-v2/service/ssm"
 	"github.com/aws/aws-sdk-go-v2/service/ssm/types"
 )
@@ -47,6 +49,11 @@ type FixtureGenerator struct {
 	rng    *rand.Rand
 	rngMu  sync.Mutex
 }
+
+const (
+	minFixtureVersions = 1
+	maxFixtureVersions = 10
+)
 
 // NewFixtureGenerator builds a generator pointed at cfg.Endpoint.
 func NewFixtureGenerator(cfg *FixtureConfig) (*FixtureGenerator, error) {
@@ -102,6 +109,7 @@ func (g *FixtureGenerator) GenerateParameters(ctx context.Context) ([]string, er
 			name := g.generateParameterName()
 			value := g.generateParameterValue()
 			ptype := g.randomParameterType()
+			versions := g.randomVersionCount()
 
 			input := &ssm.PutParameterInput{
 				Name:  aws.String(name),
@@ -125,6 +133,20 @@ func (g *FixtureGenerator) GenerateParameters(ctx context.Context) ([]string, er
 				default:
 				}
 				return
+			}
+			for version := 2; version <= versions; version++ {
+				if _, err := g.client.PutParameter(ctx, &ssm.PutParameterInput{
+					Name:      aws.String(name),
+					Value:     aws.String(g.generateParameterValue()),
+					Type:      ptype,
+					Overwrite: aws.Bool(true),
+				}); err != nil {
+					select {
+					case errCh <- fmt.Errorf("PutParameter version %d for %s: %w", version, name, err):
+					default:
+					}
+					return
+				}
 			}
 			names <- name
 		}()
@@ -205,6 +227,110 @@ func (g *FixtureGenerator) CleanupParameters(ctx context.Context, names []string
 	return nil
 }
 
+// SecretsManagerFixtureGenerator creates deterministic Secrets Manager fixtures
+// against moto for integration tests.
+type SecretsManagerFixtureGenerator struct {
+	client *secretsmanager.Client
+}
+
+// NewSecretsManagerFixtureGenerator builds a Secrets Manager fixture generator.
+func NewSecretsManagerFixtureGenerator(cfg *FixtureConfig) (*SecretsManagerFixtureGenerator, error) {
+	if cfg == nil {
+		cfg = DefaultFixtureConfig()
+	}
+	awsCfg, err := config.LoadDefaultConfig(context.Background(),
+		config.WithRegion(cfg.Region),
+		config.WithCredentialsProvider(credentials.NewStaticCredentialsProvider("testing", "testing", "testing")),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load AWS config: %w", err)
+	}
+	return &SecretsManagerFixtureGenerator{client: secretsmanager.NewFromConfig(awsCfg, func(o *secretsmanager.Options) {
+		o.BaseEndpoint = aws.String(cfg.Endpoint)
+	})}, nil
+}
+
+// GenerateSecrets creates text secrets plus one binary secret when count is
+// greater than one. Names include a run identifier so repeated local runs do
+// not collide with fixtures already in moto.
+func (g *SecretsManagerFixtureGenerator) GenerateSecrets(ctx context.Context, count int) ([]string, error) {
+	if count < 0 {
+		return nil, fmt.Errorf("secret count must not be negative")
+	}
+	created := make([]string, 0, count)
+	runID := time.Now().UnixNano()
+	rng := rand.New(rand.NewSource(runID))
+	for i := 0; i < count; i++ {
+		name := fmt.Sprintf("fixture-sm-%d-%d", runID, i)
+		binary := count > 1 && i == count-1
+		versions := randomFixtureVersionCount(rng)
+		in := &secretsmanager.CreateSecretInput{
+			Name: aws.String(name),
+			Tags: []secretsmanagertypes.Tag{
+				{Key: aws.String("fixture"), Value: aws.String("manual")},
+			},
+		}
+		if binary {
+			in.SecretBinary = []byte{0, 1, 2, 3}
+		} else {
+			in.SecretString = aws.String(fmt.Sprintf("fixture-secret-value-%d", i))
+		}
+		if _, err := g.client.CreateSecret(ctx, in); err != nil {
+			return created, fmt.Errorf("CreateSecret %s: %w", name, err)
+		}
+		for version := 2; version <= versions; version++ {
+			versionInput := &secretsmanager.PutSecretValueInput{SecretId: aws.String(name)}
+			if binary {
+				versionInput.SecretBinary = []byte{0, 1, 2, 3, byte(version)}
+			} else {
+				versionInput.SecretString = aws.String(fmt.Sprintf("fixture-secret-value-%d-v%d", i, version))
+			}
+			if _, err := g.client.PutSecretValue(ctx, versionInput); err != nil {
+				return created, fmt.Errorf("PutSecretValue version %d for %s: %w", version, name, err)
+			}
+		}
+		created = append(created, name)
+	}
+	return created, nil
+}
+
+// GenerateSpecificSecrets creates text and binary secrets used by integration tests.
+func (g *SecretsManagerFixtureGenerator) GenerateSpecificSecrets(ctx context.Context) ([]string, error) {
+	fixtures := []struct {
+		name   string
+		string string
+		binary []byte
+	}{
+		{name: "test-sm-string", string: "secret-manager-value"},
+		{name: "test-sm-binary", binary: []byte{0, 1, 2, 3}},
+	}
+	created := make([]string, 0, len(fixtures))
+	for _, fixture := range fixtures {
+		in := &secretsmanager.CreateSecretInput{Name: aws.String(fixture.name), Tags: []secretsmanagertypes.Tag{{Key: aws.String("fixture"), Value: aws.String("integration")}}}
+		if fixture.binary != nil {
+			in.SecretBinary = fixture.binary
+		} else {
+			in.SecretString = aws.String(fixture.string)
+		}
+		if _, err := g.client.CreateSecret(ctx, in); err != nil {
+			return created, fmt.Errorf("CreateSecret %s: %w", fixture.name, err)
+		}
+		created = append(created, fixture.name)
+	}
+	return created, nil
+}
+
+// CleanupSecrets force-deletes test secrets. Moto resets between specs, but the
+// helper also supports callers that reuse a fixture endpoint.
+func (g *SecretsManagerFixtureGenerator) CleanupSecrets(ctx context.Context, names []string) error {
+	for _, name := range names {
+		if _, err := g.client.DeleteSecret(ctx, &secretsmanager.DeleteSecretInput{SecretId: aws.String(name), ForceDeleteWithoutRecovery: aws.Bool(true)}); err != nil && !strings.Contains(err.Error(), "ResourceNotFound") {
+			return fmt.Errorf("DeleteSecret %s: %w", name, err)
+		}
+	}
+	return nil
+}
+
 func (g *FixtureGenerator) generateParameterName() string {
 	g.rngMu.Lock()
 	defer g.rngMu.Unlock()
@@ -231,6 +357,16 @@ func (g *FixtureGenerator) generateParameterValue() string {
 		b[i] = charset[g.rng.Intn(len(charset))]
 	}
 	return string(b)
+}
+
+func (g *FixtureGenerator) randomVersionCount() int {
+	g.rngMu.Lock()
+	defer g.rngMu.Unlock()
+	return randomFixtureVersionCount(g.rng)
+}
+
+func randomFixtureVersionCount(rng *rand.Rand) int {
+	return minFixtureVersions + rng.Intn(maxFixtureVersions-minFixtureVersions+1)
 }
 
 func (g *FixtureGenerator) randomParameterType() types.ParameterType {
