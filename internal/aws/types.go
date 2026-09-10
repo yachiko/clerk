@@ -96,6 +96,88 @@ type SecretValueSelector struct {
 	VersionID    string
 }
 
+// SecretValueInput is a value to write to Secrets Manager. Kind makes empty
+// text and empty binary values unambiguous.
+type SecretValueInput struct {
+	Kind   ValueKind `json:"kind"`
+	Text   string    `json:"text,omitempty"`
+	Binary []byte    `json:"binary,omitempty"`
+}
+
+// CreateSecretRequest describes a new secret and its initial value.
+type CreateSecretRequest struct {
+	Name        string            `json:"name"`
+	Value       SecretValueInput  `json:"value"`
+	Description string            `json:"description,omitempty"`
+	KMSKeyID    string            `json:"kms_key_id,omitempty"`
+	Tags        map[string]string `json:"tags,omitempty"`
+}
+
+// CreateSecretResult identifies the secret and initial version created.
+type CreateSecretResult struct {
+	Identity  ResourceIdentity `json:"identity"`
+	Name      string           `json:"name"`
+	ARN       string           `json:"arn"`
+	VersionID string           `json:"version_id"`
+}
+
+// PutSecretValueRequest describes a new immutable version of a secret.
+type PutSecretValueRequest struct {
+	SecretID      string           `json:"secret_id"`
+	Value         SecretValueInput `json:"value"`
+	VersionStages []string         `json:"version_stages,omitempty"`
+}
+
+// PutSecretValueResult identifies the version created.
+type PutSecretValueResult struct {
+	Identity      ResourceIdentity `json:"identity"`
+	Name          string           `json:"name"`
+	ARN           string           `json:"arn"`
+	VersionID     string           `json:"version_id"`
+	VersionStages []string         `json:"version_stages,omitempty"`
+}
+
+// TagSecretRequest adds or replaces tags on a secret.
+type TagSecretRequest struct {
+	SecretID string            `json:"secret_id"`
+	Tags     map[string]string `json:"tags"`
+}
+
+// UntagSecretRequest removes tags by key from a secret.
+type UntagSecretRequest struct {
+	SecretID string   `json:"secret_id"`
+	TagKeys  []string `json:"tag_keys"`
+}
+
+// DeleteSecretRequest requests either a scheduled deletion with an explicit
+// 7-30 day recovery window or an explicitly permanent deletion.
+type DeleteSecretRequest struct {
+	SecretID           string `json:"secret_id"`
+	RecoveryWindowDays int64  `json:"recovery_window_days,omitempty"`
+	Permanent          bool   `json:"permanent,omitempty"`
+}
+
+// DeleteSecretResult identifies the deletion and, for scheduled deletion, when
+// the secret becomes eligible for permanent removal.
+type DeleteSecretResult struct {
+	Identity     ResourceIdentity `json:"identity"`
+	Name         string           `json:"name"`
+	ARN          string           `json:"arn"`
+	DeletionDate *time.Time       `json:"deletion_date,omitempty"`
+}
+
+// RestoreSecretRequest identifies a secret with a scheduled deletion to cancel.
+type RestoreSecretRequest struct {
+	SecretID string `json:"secret_id"`
+}
+
+// RestoreSecretResult identifies the restored secret.
+type RestoreSecretResult struct {
+	Identity ResourceIdentity `json:"identity"`
+	Name     string           `json:"name"`
+	ARN      string           `json:"arn"`
+}
+
 // NewTextValue constructs a text resource value.
 func NewTextValue(identity ResourceIdentity, value string) ResourceValue {
 	return ResourceValue{Identity: identity, Kind: ValueText, Text: value}

@@ -20,8 +20,8 @@ func InitBrowseCommand() *cobra.Command {
 		Short: "Interactively browse secret metadata",
 		Long: `Start an interactive terminal UI for the selected secret backend.
 
-The default view combines Parameter Store (SSM) and Secrets Manager (SM) in one
-hierarchy. Secrets Manager actions are read-only.
+Parameter Store is used by default. Each backend has a provider-specific view
+and actions.
 
 Keyboard shortcuts:
   Navigation:
@@ -79,36 +79,29 @@ func runBrowse(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("failed to resolve AWS context: %w", err)
 	}
-	var ssmClient *aws.Client
-	if backend == aws.BackendAll || backend == aws.BackendSSM {
-		ssmClient, err = aws.NewClientFromContext(resolved, awsOpts)
+	manager, err := cache.NewManagerForBackend(cfg, resolved.Partition, resolved.Region, resolved.AccountID, backend)
+	if err != nil {
+		return fmt.Errorf("failed to initialize %s cache: %w", backend, err)
+	}
+	scope := aws.ResourceIdentity{Partition: resolved.Partition, AccountID: resolved.AccountID, Region: resolved.Region, Backend: backend}
+	var model tea.Model
+	switch backend {
+	case aws.BackendSSM:
+		client, err := aws.NewClientFromContext(resolved, awsOpts)
 		if err != nil {
 			return fmt.Errorf("failed to create SSM client: %w", err)
 		}
-	}
-	var secretsClient *aws.SecretsManagerClient
-	if backend == aws.BackendAll || backend == aws.BackendSecretsManager {
-		secretsClient, err = aws.NewSecretsManagerClient(resolved)
+		model = ui.NewSSMModel(client, manager, cfg, scope)
+	case aws.BackendSecretsManager:
+		client, err := aws.NewSecretsManagerClient(resolved)
 		if err != nil {
 			return fmt.Errorf("failed to create Secrets Manager client: %w", err)
 		}
+		model = ui.NewSecretsManagerModel(client, manager, cfg, scope)
+	default:
+		return fmt.Errorf("unsupported browse backend %q", backend)
 	}
 
-	caches := make(map[aws.Backend]*cache.Manager)
-	for _, candidate := range []aws.Backend{aws.BackendSSM, aws.BackendSecretsManager} {
-		if backend != aws.BackendAll && backend != candidate {
-			continue
-		}
-		manager, cacheErr := cache.NewManagerForBackend(cfg, resolved.Partition, resolved.Region, resolved.AccountID, candidate)
-		if cacheErr != nil {
-			return fmt.Errorf("failed to initialize %s cache: %w", candidate, cacheErr)
-		}
-		caches[candidate] = manager
-	}
-
-	// Create and run UI immediately - background refresh will load data
-	scope := aws.ResourceIdentity{Partition: resolved.Partition, AccountID: resolved.AccountID, Region: resolved.Region}
-	model := ui.NewCombinedModel(ssmClient, secretsClient, caches, cfg, backend, scope)
 	p := tea.NewProgram(model, tea.WithAltScreen())
 
 	if _, err := p.Run(); err != nil {

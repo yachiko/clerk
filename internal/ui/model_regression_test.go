@@ -3,9 +3,9 @@ package ui
 import (
 	"context"
 	"errors"
+	"os"
 	"strings"
 	"testing"
-	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/yachiko/clerk/internal/aws"
@@ -14,12 +14,20 @@ import (
 )
 
 type fakeSecretsManager struct {
-	metadata                            []aws.SecretMetadata
-	versions                            []aws.SecretVersion
-	value                               *aws.SecretDetail
-	listErr, versionErr                 error
-	valueErr                            error
-	listCalls, versionCalls, valueCalls int
+	metadata []aws.SecretMetadata
+	versions []aws.SecretVersion
+	value    *aws.SecretDetail
+
+	listErr, versionErr, valueErr error
+	mutationErr                   error
+	listCalls, versionCalls       int
+	valueCalls                    int
+	createRequests                []aws.CreateSecretRequest
+	versionRequests               []aws.PutSecretValueRequest
+	tagRequests                   []aws.TagSecretRequest
+	untagRequests                 []aws.UntagSecretRequest
+	deleteRequests                []aws.DeleteSecretRequest
+	restoreRequests               []aws.RestoreSecretRequest
 }
 
 func (f *fakeSecretsManager) ListSecrets(context.Context) ([]aws.SecretMetadata, error) {
@@ -34,285 +42,277 @@ func (f *fakeSecretsManager) GetSecretValue(context.Context, string, aws.SecretV
 	f.valueCalls++
 	return f.value, f.valueErr
 }
+func (f *fakeSecretsManager) CreateSecret(_ context.Context, request aws.CreateSecretRequest) (*aws.CreateSecretResult, error) {
+	f.createRequests = append(f.createRequests, request)
+	return &aws.CreateSecretResult{Name: request.Name}, f.mutationErr
+}
+func (f *fakeSecretsManager) PutSecretValue(_ context.Context, request aws.PutSecretValueRequest) (*aws.PutSecretValueResult, error) {
+	f.versionRequests = append(f.versionRequests, request)
+	return &aws.PutSecretValueResult{}, f.mutationErr
+}
+func (f *fakeSecretsManager) TagResource(_ context.Context, request aws.TagSecretRequest) error {
+	f.tagRequests = append(f.tagRequests, request)
+	return f.mutationErr
+}
+func (f *fakeSecretsManager) UntagResource(_ context.Context, request aws.UntagSecretRequest) error {
+	f.untagRequests = append(f.untagRequests, request)
+	return f.mutationErr
+}
+func (f *fakeSecretsManager) DeleteSecret(_ context.Context, request aws.DeleteSecretRequest) (*aws.DeleteSecretResult, error) {
+	f.deleteRequests = append(f.deleteRequests, request)
+	return &aws.DeleteSecretResult{}, f.mutationErr
+}
+func (f *fakeSecretsManager) RestoreSecret(_ context.Context, request aws.RestoreSecretRequest) (*aws.RestoreSecretResult, error) {
+	f.restoreRequests = append(f.restoreRequests, request)
+	return &aws.RestoreSecretResult{}, f.mutationErr
+}
 
 func resourceID(backend aws.Backend, canonical string) aws.ResourceIdentity {
 	return aws.ResourceIdentity{Partition: "aws", AccountID: "123456789012", Region: "us-east-1", Backend: backend, CanonicalID: canonical}
 }
 
-func updateModel(t *testing.T, m Model, msg tea.Msg) Model {
+func updateSSM(t *testing.T, m Model, msg tea.Msg) Model {
 	t.Helper()
-	got, _ := m.Update(msg)
-	return got.(Model)
+	updated, _ := m.Update(msg)
+	return updated.(Model)
 }
 
-func TestDescribeResultsRequireCurrentIdentityAndGeneration(t *testing.T) {
-	m := Model{state: State{Mode: ViewModeDescribe, DescribeParamName: "/b", DescribeGeneration: 2}}
-	m = updateModel(t, m, describeLoadedMsg{name: "/a", generation: 1, value: "a"})
+func updateSM(t *testing.T, m SecretsManagerModel, msg tea.Msg) (SecretsManagerModel, tea.Cmd) {
+	t.Helper()
+	updated, cmd := m.Update(msg)
+	return updated.(SecretsManagerModel), cmd
+}
+
+func smTestModel(provider *fakeSecretsManager, entries ...cache.CacheEntry) SecretsManagerModel {
+	cfg := config.DefaultConfig()
+	scope := resourceID(aws.BackendSecretsManager, "")
+	m := NewSecretsManagerModel(provider, nil, cfg, scope)
+	m.entries = entries
+	m.ready, m.width, m.height = true, 120, 25
+	m.filter()
+	return m
+}
+
+func TestSSMDescribeResultsRequireCurrentIdentityAndGeneration(t *testing.T) {
+	id := resourceID(aws.BackendSSM, "/b")
+	m := Model{state: State{Mode: ViewModeDescribe, DescribeParamName: "/b", DescribeIdentity: id, DescribeGeneration: 2}}
+	m = updateSSM(t, m, describeLoadedMsg{identity: resourceID(aws.BackendSSM, "/a"), name: "/a", generation: 1, value: "a"})
 	if m.state.DescribeValue != "" {
-		t.Fatal("stale result changed the active detail")
+		t.Fatal("stale result changed active SSM detail")
 	}
-	m = updateModel(t, m, describeLoadedMsg{name: "/b", generation: 2, value: "b"})
+	m = updateSSM(t, m, describeLoadedMsg{identity: id, name: "/b", generation: 2, value: "b"})
 	if m.state.DescribeValue != "b" {
 		t.Fatal("current result was not accepted")
 	}
-	m = updateModel(t, m, versionValuesLoadedMsg{name: "/a", generation: 1, versions: map[int64]string{1: "wrong"}})
-	if m.state.DescribeValue != "b" {
-		t.Fatal("stale version result changed the active detail")
-	}
 }
 
-func TestHistoryNavigationAndNarrowRenderingAreSafe(t *testing.T) {
-	m := Model{state: State{Mode: ViewModeDescribe, Width: 0, Height: 0}}
-	m = updateModel(t, m, tea.KeyMsg{Type: tea.KeyShiftTab})
-	if m.state.HistoryIndex != 0 {
-		t.Fatal("empty history produced an invalid index")
+func TestSSMTreeNavigationAndNarrowRenderingAreSafe(t *testing.T) {
+	entries := []cache.CacheEntry{{Identity: resourceID(aws.BackendSSM, "/a/b/leaf"), Name: "/a/b/leaf", Type: "String"}}
+	m := Model{state: State{Mode: ViewModeTree, FilteredItems: entries, ExpandedPaths: map[string]bool{"/a": true, "/a/b": true}, Height: 20}}
+	m.buildTree()
+	m = updateSSM(t, m, tea.KeyMsg{Type: tea.KeyEnd})
+	if m.state.SelectedIndex != 2 {
+		t.Fatalf("selected %d, want final tree row", m.state.SelectedIndex)
 	}
-	_ = m.renderDescribeView()
-	m.state.Mode = ViewModeList
+	m.state.Width, m.state.Height = 0, 0
 	_ = m.renderBrowseView()
 }
 
-func TestTreeUsesVisibleRowsForNavigation(t *testing.T) {
-	entries := []cache.CacheEntry{{Name: "/a/b/leaf", Type: "String"}}
-	m := Model{state: State{Mode: ViewModeTree, FilteredItems: entries, ExpandedPaths: map[string]bool{"/a": true, "/a/b": true}, Height: 20}}
-	m.buildTree()
-	if len(m.state.TreeNodes) != 3 {
-		t.Fatalf("got %d visible nodes, want 3", len(m.state.TreeNodes))
-	}
-	m = updateModel(t, m, tea.KeyMsg{Type: tea.KeyDown})
-	if m.state.SelectedIndex != 1 {
-		t.Fatalf("down selected %d, want directory row 1", m.state.SelectedIndex)
-	}
-	m = updateModel(t, m, tea.KeyMsg{Type: tea.KeyEnd})
-	if m.state.SelectedIndex != 2 {
-		t.Fatalf("end selected %d, want final tree row", m.state.SelectedIndex)
-	}
-}
-
-func TestEqualNamesRemainQualifiedAndVisiblyLabeled(t *testing.T) {
-	ssmID, smID := resourceID(aws.BackendSSM, "/shared"), resourceID(aws.BackendSecretsManager, "arn:shared")
-	entries := []cache.CacheEntry{{Identity: ssmID, Name: "/shared", Type: "SecureString"}, {Identity: smID, Name: "/shared", Type: "Secret"}}
-	m := Model{state: State{Mode: ViewModeList, FilteredItems: entries, Entries: entries, ExpandedPaths: map[string]bool{}, Width: 100, Height: 20}, scope: ssmID}
-	list := m.renderBrowseView()
-	if !strings.Contains(list, "[SSM] /shared") || !strings.Contains(list, "[SM] /shared") {
-		t.Fatalf("backend labels missing from list:\n%s", list)
-	}
-	m.state.Mode = ViewModeTree
-	m.buildTree()
-	if len(m.state.TreeNodes) != 2 || m.state.TreeNodes[0].Identity == m.state.TreeNodes[1].Identity {
-		t.Fatalf("tree conflated equal names: %#v", m.state.TreeNodes)
-	}
-	tree := m.renderBrowseView()
-	if !strings.Contains(tree, "[SSM]") || !strings.Contains(tree, "[SM]") {
-		t.Fatalf("backend labels missing from tree:\n%s", tree)
-	}
-}
-
-func TestScopeAndBackendAreVisibleInDetailAndConfirmation(t *testing.T) {
-	id := resourceID(aws.BackendSSM, "/prod/key")
-	entry := cache.CacheEntry{Identity: id, Name: "/prod/key", Type: "SecureString"}
-	m := Model{state: State{Mode: ViewModeDescribe, DescribeEntry: &entry, DescribeIdentity: id, Width: 120, Height: 24}, scope: id}
-	view := m.renderDescribeView()
-	for _, text := range []string{"DESCRIBE SSM", id.AccountID, id.Region, "[SSM] /prod/key"} {
-		if !strings.Contains(view, text) {
-			t.Fatalf("detail missing %q", text)
-		}
-	}
-	m.state.Confirm = ConfirmState{Active: true, Action: "delete", Target: entry.Name, Identity: id}
-	if dialog := m.renderConfirmDialog(); !strings.Contains(dialog, "[SSM] /prod/key") {
-		t.Fatalf("confirmation lacks backend label: %s", dialog)
-	}
-}
-
-func TestCrossBackendDetailResponsesAreDiscarded(t *testing.T) {
-	ssmID, smID := resourceID(aws.BackendSSM, "/same"), resourceID(aws.BackendSecretsManager, "arn:same")
-	entry := cache.CacheEntry{Identity: smID, Name: "/same", Type: "Secret"}
-	m := Model{state: State{Mode: ViewModeDescribe, DescribeEntry: &entry, DescribeIdentity: smID, DescribeParamName: "/same", DescribeGeneration: 7}}
-	m = updateModel(t, m, describeLoadedMsg{identity: ssmID, name: "/same", generation: 7, value: "wrong"})
-	if m.state.DescribeValue != "" {
-		t.Fatal("stale SSM response populated SM detail")
-	}
-	m = updateModel(t, m, secretValueLoadedMsg{identity: smID, generation: 6, value: aws.NewTextValue(smID, "wrong")})
-	if m.state.DescribeValue != "" {
-		t.Fatal("stale SM generation populated detail")
-	}
-	ssmEntry := cache.CacheEntry{Identity: ssmID, Name: "/same", Type: "SecureString"}
-	m.state.DescribeEntry, m.state.DescribeIdentity = &ssmEntry, ssmID
-	m = updateModel(t, m, secretValueLoadedMsg{identity: smID, generation: 7, value: aws.NewTextValue(smID, "wrong")})
-	if m.state.DescribeValue != "" {
-		t.Fatal("stale SM response populated SSM detail")
-	}
-}
-
-func TestSecretsManagerDetailDoesNotFetchValueAndDenialPreservesMetadata(t *testing.T) {
-	id := resourceID(aws.BackendSecretsManager, "arn:secret")
-	created := time.Date(2026, 1, 2, 3, 4, 0, 0, time.UTC)
-	provider := &fakeSecretsManager{metadata: []aws.SecretMetadata{{Identity: id, Name: "shared", ARN: id.CanonicalID, Description: "metadata survives"}}, versions: []aws.SecretVersion{{VersionID: "opaque", VersionStages: []string{"AWSCURRENT"}, CreatedDate: &created}}}
-	entry := cache.CacheEntry{Identity: id, Name: "shared", Type: "Secret"}
-	m := Model{state: State{Mode: ViewModeDescribe, DescribeEntry: &entry, DescribeIdentity: id, DescribeParamName: "shared", DescribeGeneration: 3, DescribeLoading: true}, secrets: provider, secretMetadata: map[aws.ResourceIdentity]aws.SecretMetadata{}, scope: id}
-	msg := m.loadDescribe(id, entry.Name, 3)()
-	if provider.valueCalls != 0 || provider.listCalls != 1 || provider.versionCalls != 1 {
-		t.Fatalf("detail calls: list=%d versions=%d values=%d", provider.listCalls, provider.versionCalls, provider.valueCalls)
-	}
-	m = updateModel(t, m, msg)
-	provider.valueErr = errors.New("access denied")
-	m = updateModel(t, m, m.loadSelectedSecretValue(false)())
-	if m.state.DescribeEntry == nil || m.secretMetadata[id].Description != "metadata survives" || m.state.DescribeValueError == "" {
-		t.Fatal("value denial discarded metadata or was not localized")
-	}
-}
-
-func TestSecretsManagerInventoryDoesNotFetchValues(t *testing.T) {
+func TestSecretsInventoryIsMetadataOnlyAndUsesOneSnapshot(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
-	id := resourceID(aws.BackendSecretsManager, "arn:inventory")
-	provider := &fakeSecretsManager{metadata: []aws.SecretMetadata{{Identity: id, Name: "inventory", ARN: id.CanonicalID}}}
-	cfg := &config.Config{ParallelFetches: 1}
+	id := resourceID(aws.BackendSecretsManager, "arn:secret")
+	provider := &fakeSecretsManager{metadata: []aws.SecretMetadata{{Identity: id, Name: "secret", ARN: id.CanonicalID}}}
+	cfg := config.DefaultConfig()
 	manager, err := cache.NewManagerForBackend(cfg, id.Partition, id.Region, id.AccountID, aws.BackendSecretsManager)
 	if err != nil {
 		t.Fatal(err)
 	}
-	m := NewCombinedModel(nil, provider, map[aws.Backend]*cache.Manager{aws.BackendSecretsManager: manager}, cfg, aws.BackendSecretsManager, id)
-	msg := m.refreshInventories(context.Background())()
-	if provider.valueCalls != 0 {
-		t.Fatalf("inventory fetched %d values", provider.valueCalls)
+	m := NewSecretsManagerModel(provider, manager, cfg, id)
+	msg := m.refresh(2)().(smRefreshMsg)
+	if provider.valueCalls != 0 || provider.listCalls != 1 || len(msg.entries) != 1 {
+		t.Fatalf("list=%d values=%d entries=%d", provider.listCalls, provider.valueCalls, len(msg.entries))
 	}
-	result := msg.(inventoriesRefreshedMsg)
-	if len(result.results) != 1 || len(result.results[0].entries) != 1 {
-		t.Fatalf("unexpected inventory result: %#v", result)
-	}
-}
-
-func TestPartialProviderFailureRetainsSuccessfulRows(t *testing.T) {
-	id := resourceID(aws.BackendSSM, "/available")
-	m := Model{state: State{Mode: ViewModeList, ExpandedPaths: map[string]bool{}}, backend: aws.BackendAll, caches: map[aws.Backend]*cache.Manager{}, secretMetadata: map[aws.ResourceIdentity]aws.SecretMetadata{}}
-	m = updateModel(t, m, inventoriesRefreshedMsg{results: []inventoryProviderResult{{backend: aws.BackendSSM, entries: []cache.CacheEntry{{Identity: id, Name: "/available"}}}, {backend: aws.BackendSecretsManager, err: errors.New("denied")}}})
-	if len(m.state.Entries) != 1 || m.state.Entries[0].Identity != id {
-		t.Fatal("successful provider rows were discarded")
-	}
-	if !strings.Contains(m.state.ErrorMessage, "SM: denied") || !strings.Contains(m.state.ErrorMessage, "successful rows retained") {
-		t.Fatalf("partial failure not visible: %q", m.state.ErrorMessage)
+	if got := manager.GetAll(); len(got) != 1 || got[0].Identity != id {
+		t.Fatalf("snapshot not replaced: %#v", got)
 	}
 }
 
-func TestSecretsManagerBinaryValueIsBase64AndMutationsAreDisabled(t *testing.T) {
+func TestSecretsViewHasProviderRelevantActionsOnly(t *testing.T) {
+	id := resourceID(aws.BackendSecretsManager, "arn:secret")
+	m := smTestModel(&fakeSecretsManager{}, cache.CacheEntry{Identity: id, Name: "secret"})
+	view := m.View()
+	for _, expected := range []string{"ROTATION", "TAGS", "new-version", "lifecycle", "restore"} {
+		if !strings.Contains(view, expected) {
+			t.Fatalf("SM view missing %q", expected)
+		}
+	}
+	for _, unsupported := range []string{"type", "move", "copy-to", "label", "backend"} {
+		if strings.Contains(view, unsupported) {
+			t.Fatalf("SM view exposes unsupported action %q", unsupported)
+		}
+	}
+	before := m
+	m, cmd := updateSM(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'m'}})
+	if cmd != nil || m.prompt.action != "" || m.status != before.status || m.err != before.err {
+		t.Fatal("unsupported move key entered an action path")
+	}
+}
+
+func TestSecretsDetailLoadsMetadataWithoutValue(t *testing.T) {
+	id := resourceID(aws.BackendSecretsManager, "arn:secret")
+	provider := &fakeSecretsManager{versions: []aws.SecretVersion{{VersionID: "v1", VersionStages: []string{"AWSCURRENT"}}}}
+	m := smTestModel(provider, cache.CacheEntry{Identity: id, Name: "secret"})
+	updated, cmd := m.openDetail()
+	m = updated.(SecretsManagerModel)
+	if cmd == nil {
+		t.Fatal("detail did not request version metadata")
+	}
+	m, _ = updateSM(t, m, cmd())
+	if provider.versionCalls != 1 || provider.valueCalls != 0 || m.valueLoaded {
+		t.Fatalf("versions=%d values=%d loaded=%v", provider.versionCalls, provider.valueCalls, m.valueLoaded)
+	}
+}
+
+func TestSecretsStaleAndCrossIdentityValuesAreRejected(t *testing.T) {
+	id := resourceID(aws.BackendSecretsManager, "arn:secret")
+	m := smTestModel(&fakeSecretsManager{}, cache.CacheEntry{Identity: id, Name: "secret"})
+	m.mode, m.detailIdentity, m.detailGeneration = smDetail, id, 4
+	m, _ = updateSM(t, m, smValueMsg{identity: id, generation: 3, versionID: "v1", value: aws.NewTextValue(id, "stale")})
+	m, _ = updateSM(t, m, smValueMsg{identity: resourceID(aws.BackendSecretsManager, "arn:other"), generation: 4, versionID: "v1", value: aws.NewTextValue(id, "wrong")})
+	if m.valueLoaded {
+		t.Fatal("stale response populated detail")
+	}
+}
+
+func TestSecretsBinaryValueUsesBase64(t *testing.T) {
 	id := resourceID(aws.BackendSecretsManager, "arn:binary")
-	entry := cache.CacheEntry{Identity: id, Name: "binary", Type: "Secret"}
-	m := Model{state: State{Mode: ViewModeDescribe, DescribeEntry: &entry, DescribeIdentity: id, DescribeParamName: "binary", DescribeGeneration: 1, DescribeHistory: []HistoryEntry{{VersionID: "v1"}}, Width: 100, Height: 20}}
-	m = updateModel(t, m, secretValueLoadedMsg{identity: id, generation: 1, versionID: "v1", value: aws.NewBinaryValue(id, []byte{0, 1, 2, 255})})
-	if m.state.DescribeValue != "AAEC/w==" || m.state.DescribeValueKind != aws.ValueBinary {
-		t.Fatalf("unsafe binary rendering: %q (%s)", m.state.DescribeValue, m.state.DescribeValueKind)
-	}
-	updated, cmd := m.handleDescribeKeys(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
-	blocked := updated.(Model)
-	if cmd != nil || !strings.Contains(blocked.state.StatusMessage, "SM binary") || !strings.Contains(blocked.state.StatusMessage, "disabled") {
-		t.Fatal("SM edit was not blocked before provider access")
+	m := smTestModel(&fakeSecretsManager{}, cache.CacheEntry{Identity: id, Name: "binary"})
+	m.mode, m.detailIdentity, m.detailGeneration = smDetail, id, 1
+	m, _ = updateSM(t, m, smValueMsg{identity: id, generation: 1, versionID: "v1", value: aws.NewBinaryValue(id, []byte{0, 1, 2, 255})})
+	if got := displaySecretValue(m.value); got != "AAEC/w==" {
+		t.Fatalf("binary display = %q", got)
 	}
 }
 
-func TestOutOfOrderSecretVersionsDoNotReplaceSelectedValue(t *testing.T) {
-	id := resourceID(aws.BackendSecretsManager, "arn:versions")
-	entry := cache.CacheEntry{Identity: id, Name: "versions"}
-	m := Model{state: State{Mode: ViewModeDescribe, DescribeEntry: &entry, DescribeIdentity: id, DescribeGeneration: 4, DescribeHistory: []HistoryEntry{{VersionID: "new"}, {VersionID: "old"}}, HistoryIndex: 0}}
-
-	m = updateModel(t, m, secretValueLoadedMsg{identity: id, generation: 4, requestedVersionID: "old", versionID: "old", value: aws.NewTextValue(id, "stale")})
-	if m.state.DescribeValue != "" || !m.state.DescribeHistory[1].ValueLoaded {
-		t.Fatal("older response replaced the selected version or was not retained in history")
+func TestSecretsBinaryWritesRequireFilebPath(t *testing.T) {
+	id := resourceID(aws.BackendSecretsManager, "arn:binary")
+	provider := &fakeSecretsManager{}
+	m := smTestModel(provider, cache.CacheEntry{Identity: id, Name: "binary"})
+	msg := m.writeBinary("version", id, 1, "binary", "value.bin")().(smMutationMsg)
+	if msg.err == nil || len(provider.versionRequests) != 0 {
+		t.Fatal("non-fileb binary source reached provider")
 	}
-	m = updateModel(t, m, secretValueLoadedMsg{identity: id, generation: 4, requestedVersionID: "new", versionID: "new", value: aws.NewTextValue(id, "current")})
-	if m.state.DescribeValue != "current" {
-		t.Fatalf("selected version value = %q", m.state.DescribeValue)
+	path := t.TempDir() + "/value.bin"
+	if err := os.WriteFile(path, []byte{0, 255}, 0600); err != nil {
+		t.Fatal(err)
 	}
-}
-
-func TestEarlyCurrentRevealSelectsAWSCURRENTWhenPendingIsFirst(t *testing.T) {
-	id := resourceID(aws.BackendSecretsManager, "arn:rotation")
-	entry := cache.CacheEntry{Identity: id, Name: "rotation"}
-	m := Model{state: State{
-		Mode: ViewModeDescribe, DescribeEntry: &entry, DescribeIdentity: id,
-		DescribeGeneration: 5, DescribeLoading: true,
-		DescribeHistory: []HistoryEntry{{VersionID: "pending", Labels: []string{"AWSPENDING"}}, {VersionID: "current", Labels: []string{"AWSCURRENT"}}},
-	}}
-
-	m = updateModel(t, m, secretValueLoadedMsg{identity: id, generation: 5, versionID: "current", value: aws.NewTextValue(id, "current value")})
-	if m.state.HistoryIndex != 1 || m.state.DescribeValue != "current value" || m.state.DescribeLoading {
-		t.Fatalf("history=%d value=%q loading=%v", m.state.HistoryIndex, m.state.DescribeValue, m.state.DescribeLoading)
+	msg = m.writeBinary("version", id, 1, "binary", "fileb://"+path)().(smMutationMsg)
+	if msg.err != nil || len(provider.versionRequests) != 1 || string(provider.versionRequests[0].Value.Binary) != string([]byte{0, 255}) {
+		t.Fatalf("binary write failed: %#v requests=%#v", msg, provider.versionRequests)
 	}
 }
 
-func TestRequestedVersionCopyCompletesAfterVersionNavigation(t *testing.T) {
-	id := resourceID(aws.BackendSecretsManager, "arn:copy-version")
-	entry := cache.CacheEntry{Identity: id, Name: "copy-version"}
-	m := Model{state: State{Mode: ViewModeDescribe, DescribeEntry: &entry, DescribeIdentity: id, DescribeGeneration: 3, DescribeSelectionChanged: true, DescribeHistory: []HistoryEntry{{VersionID: "new"}, {VersionID: "old"}}, HistoryIndex: 0}}
-
-	updated, cmd := m.Update(secretValueLoadedMsg{identity: id, generation: 3, requestedVersionID: "old", versionID: "old", value: aws.NewTextValue(id, "copy me"), copy: true})
-	m = updated.(Model)
-	if cmd == nil || m.state.DescribeValue != "" || !m.state.DescribeHistory[1].ValueLoaded {
-		t.Fatal("copy was dropped or changed the visible selected version")
+func TestSecretsDeletionRequiresValidChoiceAndConfirmation(t *testing.T) {
+	id := resourceID(aws.BackendSecretsManager, "arn:delete")
+	provider := &fakeSecretsManager{}
+	m := smTestModel(provider, cache.CacheEntry{Identity: id, Name: "delete-me"})
+	m.prompt = smPrompt{action: "delete-options", input: "6"}
+	updated, cmd := m.submitPrompt()
+	m = updated.(SecretsManagerModel)
+	if cmd != nil || m.prompt.error == "" {
+		t.Fatal("invalid recovery window accepted")
 	}
-}
-
-func TestSecretValueFailuresDoNotLeaveDetailLoading(t *testing.T) {
-	id := resourceID(aws.BackendSecretsManager, "arn:value-error")
-	entry := cache.CacheEntry{Identity: id, Name: "value-error"}
-	m := Model{state: State{Mode: ViewModeDescribe, DescribeEntry: &entry, DescribeIdentity: id, DescribeParamName: entry.Name, DescribeGeneration: 6, DescribeLoading: true, DescribeHistory: []HistoryEntry{{VersionID: "current", Labels: []string{"AWSCURRENT"}}}}}
-
-	m = updateModel(t, m, secretValueLoadedMsg{identity: id, generation: 6, err: errors.New("denied")})
-	if m.state.DescribeLoading || !strings.Contains(m.state.DescribeValueError, "denied") {
-		t.Fatal("failed default value request was discarded")
+	m.prompt = smPrompt{action: "delete-options", input: "14"}
+	updated, _ = m.submitPrompt()
+	m = updated.(SecretsManagerModel)
+	if m.prompt.action != "delete-confirm" || m.prompt.recoveryDays != 14 {
+		t.Fatal("valid recovery window did not advance to confirmation")
 	}
-
-	m.state.DescribeSelectionChanged = true
-	m.state.ErrorMessage = ""
-	m = updateModel(t, m, secretValueLoadedMsg{identity: id, generation: 6, requestedVersionID: "old", versionID: "old", copy: true, err: errors.New("copy denied")})
-	if !strings.Contains(m.state.ErrorMessage, "copy denied") {
-		t.Fatal("failed copy was discarded after version navigation")
-	}
-}
-
-func TestSecretMetadataSurvivesVersionListDenial(t *testing.T) {
-	id := resourceID(aws.BackendSecretsManager, "arn:denied-versions")
-	metadata := aws.SecretMetadata{Identity: id, Name: "metadata", ARN: id.CanonicalID, Description: "still visible"}
-	entry := cache.CacheEntry{Identity: id, Name: metadata.Name}
-	m := Model{state: State{Mode: ViewModeDescribe, DescribeEntry: &entry, DescribeIdentity: id, DescribeParamName: metadata.Name, DescribeGeneration: 2}, secretMetadata: map[aws.ResourceIdentity]aws.SecretMetadata{}}
-
-	m = updateModel(t, m, secretDetailLoadedMsg{identity: id, generation: 2, metadata: metadata, err: errors.New("versions denied")})
-	if m.secretMetadata[id].Description != "still visible" || !strings.Contains(m.state.ErrorMessage, "versions denied") {
-		t.Fatal("version denial discarded readable secret metadata")
-	}
-}
-
-func TestRevealBeforeSecretVersionsLoadFetchesCurrentValue(t *testing.T) {
-	id := resourceID(aws.BackendSecretsManager, "arn:current")
-	entry := cache.CacheEntry{Identity: id, Name: "current"}
-	provider := &fakeSecretsManager{value: &aws.SecretDetail{Identity: id, Name: entry.Name, ARN: id.CanonicalID, VersionID: "v1", Value: aws.NewTextValue(id, "value")}}
-	m := Model{state: State{Mode: ViewModeDescribe, DescribeEntry: &entry, DescribeIdentity: id, DescribeParamName: entry.Name, DescribeGeneration: 1, DescribeMasked: true}, secrets: provider}
-
-	updated, cmd := m.handleDescribeKeys(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'x'}})
-	m = updated.(Model)
+	m.prompt.input = "delete delete-me"
+	updated, cmd = m.submitPrompt()
+	m = updated.(SecretsManagerModel)
 	if cmd == nil {
-		t.Fatal("reveal was dropped while version metadata was unavailable")
+		t.Fatal("confirmed deletion did not produce command")
 	}
-	m = updateModel(t, m, cmd())
-	if provider.valueCalls != 1 || m.state.DescribeValue != "value" {
-		t.Fatalf("value calls=%d value=%q", provider.valueCalls, m.state.DescribeValue)
-	}
-}
-
-func TestEmptyLoadedSecretCanBeCopied(t *testing.T) {
-	id := resourceID(aws.BackendSecretsManager, "arn:empty")
-	entry := cache.CacheEntry{Identity: id, Name: "empty"}
-	m := Model{state: State{Mode: ViewModeDescribe, DescribeEntry: &entry, DescribeIdentity: id, DescribeGeneration: 1, DescribeValueKind: aws.ValueText}}
-
-	_, cmd := m.handleDescribeKeys(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'c'}})
-	if cmd == nil {
-		t.Fatal("copy was disabled for a loaded empty value")
+	msg := cmd().(smMutationMsg)
+	if msg.err != nil || len(provider.deleteRequests) != 1 || provider.deleteRequests[0].RecoveryWindowDays != 14 || provider.deleteRequests[0].Permanent {
+		t.Fatalf("unexpected delete request: %#v", provider.deleteRequests)
 	}
 }
 
-func TestDeleteCompletionReconcilesAfterSelectionChanges(t *testing.T) {
+func TestSecretsPermanentDeletionMustBeExplicit(t *testing.T) {
+	id := resourceID(aws.BackendSecretsManager, "arn:delete")
+	m := smTestModel(&fakeSecretsManager{}, cache.CacheEntry{Identity: id, Name: "secret"})
+	m.prompt = smPrompt{action: "delete-options", input: "permanent"}
+	updated, _ := m.submitPrompt()
+	m = updated.(SecretsManagerModel)
+	if m.prompt.action != "delete-confirm" || !m.prompt.permanent {
+		t.Fatal("explicit permanent selection was not retained")
+	}
+}
+
+func TestSecretsTagAndRestoreUseNarrowMutationSurface(t *testing.T) {
+	id := resourceID(aws.BackendSecretsManager, "arn:secret")
+	provider := &fakeSecretsManager{}
+	m := smTestModel(provider, cache.CacheEntry{Identity: id, Name: "secret"})
+	if msg := m.changeTags(id, 0, map[string]string{"env": "prod"}, nil)().(smMutationMsg); msg.err != nil {
+		t.Fatal(msg.err)
+	}
+	if msg := m.changeTags(id, 0, nil, []string{"env"})().(smMutationMsg); msg.err != nil {
+		t.Fatal(msg.err)
+	}
+	if msg := m.restore(id, 0)().(smMutationMsg); msg.err != nil {
+		t.Fatal(msg.err)
+	}
+	if len(provider.tagRequests) != 1 || len(provider.untagRequests) != 1 || len(provider.restoreRequests) != 1 {
+		t.Fatalf("mutation calls: add=%d remove=%d restore=%d", len(provider.tagRequests), len(provider.untagRequests), len(provider.restoreRequests))
+	}
+}
+
+func TestSecretsGSelectsAWSCURRENT(t *testing.T) {
+	id := resourceID(aws.BackendSecretsManager, "arn:secret")
+	m := smTestModel(&fakeSecretsManager{}, cache.CacheEntry{Identity: id, Name: "secret"})
+	m.mode, m.detailIdentity, m.detailGeneration = smDetail, id, 2
+	m.versions = []aws.SecretVersion{{VersionID: "pending", VersionStages: []string{"AWSPENDING"}}, {VersionID: "current", VersionStages: []string{"AWSCURRENT"}}}
+	m.versionIndex = 0
+	m, _ = updateSM(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'g'}})
+	if m.versionIndex != 1 || m.selectedVersionID() != "current" {
+		t.Fatalf("selected index=%d version=%q", m.versionIndex, m.selectedVersionID())
+	}
+}
+
+func TestSecretsValueDenialPreservesMetadata(t *testing.T) {
+	id := resourceID(aws.BackendSecretsManager, "arn:secret")
+	meta := aws.SecretMetadata{Identity: id, Name: "secret", ARN: id.CanonicalID, Description: "still visible"}
+	m := smTestModel(&fakeSecretsManager{}, cache.CacheEntry{Identity: id, Name: "secret"})
+	m.metadata[id], m.mode, m.detailIdentity, m.detailGeneration = meta, smDetail, id, 3
+	m, _ = updateSM(t, m, smValueMsg{identity: id, generation: 3, err: errors.New("denied")})
+	if m.metadata[id].Description != "still visible" || !strings.Contains(m.err, "denied") {
+		t.Fatal("value denial discarded metadata or error")
+	}
+}
+
+func TestSecretsCreateInputSeparatesNameAndBinarySource(t *testing.T) {
+	name, source := splitCreateInput("prod/key | fileb:///tmp/value")
+	if name != "prod/key" || source != "fileb:///tmp/value" {
+		t.Fatalf("name=%q source=%q", name, source)
+	}
+}
+
+func TestSecretsRefreshFailureRetainsExistingRows(t *testing.T) {
+	id := resourceID(aws.BackendSecretsManager, "arn:cached")
+	m := smTestModel(&fakeSecretsManager{}, cache.CacheEntry{Identity: id, Name: "cached"})
+	m.refreshGen = 2
+	m, _ = updateSM(t, m, smRefreshMsg{generation: 2, err: errors.New("denied")})
+	if len(m.entries) != 1 || !strings.Contains(m.err, "denied") {
+		t.Fatal("refresh failure discarded cached inventory")
+	}
+}
+
+func TestDeleteCompletionReconcilesAfterSSMSelectionChanges(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	idA, idB := resourceID(aws.BackendSSM, "/a"), resourceID(aws.BackendSSM, "/b")
-	cfg := &config.Config{CacheTTL: time.Hour}
+	cfg := config.DefaultConfig()
 	manager, err := cache.NewManagerForBackend(cfg, idA.Partition, idA.Region, idA.AccountID, aws.BackendSSM)
 	if err != nil {
 		t.Fatal(err)
@@ -320,10 +320,9 @@ func TestDeleteCompletionReconcilesAfterSelectionChanges(t *testing.T) {
 	if err := manager.ReplaceSnapshot([]cache.CacheEntry{{Identity: idA, Name: "/a"}, {Identity: idB, Name: "/b"}}); err != nil {
 		t.Fatal(err)
 	}
-	m := Model{state: State{Mode: ViewModeList, Entries: manager.GetAll(), FilteredItems: manager.GetAll(), SelectedIndex: 1}, caches: map[aws.Backend]*cache.Manager{aws.BackendSSM: manager}}
-
-	m = updateModel(t, m, deleteCompleteMsg{identity: idA, generation: 1, name: "/a"})
+	m := Model{state: State{Mode: ViewModeList, Entries: manager.GetAll(), FilteredItems: manager.GetAll(), SelectedIndex: 1}, cache: manager}
+	m = updateSSM(t, m, deleteCompleteMsg{identity: idA, generation: 1, name: "/a"})
 	if _, ok := manager.GetByIdentity(idA); ok || !strings.Contains(m.state.StatusMessage, "deleted") {
-		t.Fatal("successful deletion was not reconciled after selection changed")
+		t.Fatal("successful deletion was not reconciled")
 	}
 }

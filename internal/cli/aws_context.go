@@ -12,34 +12,13 @@ func selectedBackend(cmd *cobra.Command) (aws.Backend, error) {
 	return aws.ParseBackend(globalOpts.Backend)
 }
 
-func backendWasExplicit(cmd *cobra.Command) bool {
-	return cmd.Root().PersistentFlags().Changed("backend")
-}
-
-func requireConcreteBackend(cmd *cobra.Command, operation string, explicit bool) (aws.Backend, error) {
-	backend, err := selectedBackend(cmd)
-	if err != nil {
-		return "", err
-	}
-	if explicit && !backendWasExplicit(cmd) {
-		return "", fmt.Errorf("%s requires an explicit --backend ssm or --backend secretsmanager", operation)
-	}
-	if backend == aws.BackendAll {
-		return "", fmt.Errorf("%s requires one concrete backend; choose --backend ssm or --backend secretsmanager", operation)
-	}
-	return backend, nil
-}
-
-func requireExplicitSSM(cmd *cobra.Command) error {
-	if !backendWasExplicit(cmd) {
-		return fmt.Errorf("%s requires explicit --backend ssm", cmd.Name())
-	}
+func requireSSMBackend(cmd *cobra.Command) error {
 	backend, err := selectedBackend(cmd)
 	if err != nil {
 		return err
 	}
 	if backend != aws.BackendSSM {
-		return fmt.Errorf("%s is supported only with --backend ssm", cmd.Name())
+		return fmt.Errorf("%s does not support --backend %s; only ssm is supported", cmd.Name(), backend)
 	}
 	return nil
 }

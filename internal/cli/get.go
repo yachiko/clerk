@@ -33,8 +33,8 @@ func InitGetCommand() *cobra.Command {
 		Short: "Retrieve one value from a concrete secret backend",
 		Long: `Retrieve one value from Parameter Store or Secrets Manager.
 
-You must explicitly choose --backend ssm or --backend secretsmanager. SSM keeps
-the name@version and name:label shorthand. Secrets Manager uses --stage or
+Parameter Store is used by default. SSM keeps the name@version and name:label
+shorthand. Secrets Manager uses --stage or
 --version-id and defaults to AWSCURRENT. Binary secrets are base64 unless
 --raw --value is requested.
 
@@ -83,7 +83,7 @@ Examples:
 }
 
 func validateGetFlags(cmd *cobra.Command, _ []string) error {
-	backend, err := requireConcreteBackend(cmd, "get", true)
+	backend, err := selectedBackend(cmd)
 	if err != nil {
 		return err
 	}
@@ -103,7 +103,7 @@ func runGet(cmd *cobra.Command, args []string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	backend, err := requireConcreteBackend(cmd, "get", true)
+	backend, err := selectedBackend(cmd)
 	if err != nil {
 		return err
 	}

@@ -14,7 +14,7 @@ import (
 func main() {
 	endpoint := flag.String("endpoint", "http://localhost:5000", "Moto server endpoint")
 	region := flag.String("region", "us-east-1", "AWS region")
-	count := flag.Int("count", 25, "Target total number of SSM parameters (the deterministic corpus is always included)")
+	count := flag.Int("count", 25, "Target total number of SSM parameters (the deterministic SSM and Secrets Manager corpora are always included)")
 	reset := flag.Bool("reset", false, "Reset all Moto state before creating fixtures")
 	flag.Parse()
 
@@ -58,7 +58,7 @@ func main() {
 	}
 
 	credentials := fmt.Sprintf("AWS_ENDPOINT_URL=%s AWS_REGION=%s AWS_ACCESS_KEY_ID=testing AWS_SECRET_ACCESS_KEY=testing AWS_SESSION_TOKEN=testing", endpointValue, *region)
-	fmt.Printf("\nNext commands:\n  %s go run ./cmd/clerk browse --backend all\n  %s go run ./cmd/clerk list --backend all\n", credentials, credentials)
+	fmt.Printf("\nNext commands:\n  %s go run ./cmd/clerk list --backend ssm\n  %s go run ./cmd/clerk list --backend secretsmanager --tags\n  %s go run ./cmd/clerk browse --backend secretsmanager\n", credentials, credentials, credentials)
 }
 
 func fatalf(format string, args ...any) {

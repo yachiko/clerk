@@ -12,14 +12,19 @@ var _ = Describe("Backend", func() {
 			Expect(err).NotTo(HaveOccurred())
 			Expect(backend).To(Equal(want))
 		},
-		Entry("all", "all", BackendAll),
 		Entry("SSM", " SSM ", BackendSSM),
 		Entry("Secrets Manager", "secretsmanager", BackendSecretsManager),
 	)
 
+	It("rejects the removed aggregate selector", func() {
+		backend, err := ParseBackend("all")
+		Expect(err).To(MatchError(`invalid backend "all" (valid: ssm, secretsmanager)`))
+		Expect(backend).To(BeEmpty())
+	})
+
 	It("rejects an unsupported selector", func() {
 		backend, err := ParseBackend("parameterstore")
-		Expect(err).To(MatchError(`invalid backend "parameterstore" (valid: all, ssm, secretsmanager)`))
+		Expect(err).To(MatchError(`invalid backend "parameterstore" (valid: ssm, secretsmanager)`))
 		Expect(backend).To(BeEmpty())
 	})
 })

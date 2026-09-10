@@ -85,7 +85,11 @@ func runRefresh(cmd *cobra.Command, args []string) error {
 	var progressCb cache.RefreshProgressCallback
 
 	if globalOpts.Output != "json" {
-		color.Cyan("Loading parameters...")
+		resourceName := "parameters"
+		if backend == aws.BackendSecretsManager {
+			resourceName = "secrets"
+		}
+		color.Cyan("Loading %s...", resourceName)
 		progressCb = func(current, total int) {
 			fmt.Printf("\rLoaded: %d", current)
 		}
@@ -132,38 +136,32 @@ func runRefresh(cmd *cobra.Command, args []string) error {
 	newStats := cacheMgr.GetStats()
 
 	// Output result
-	return outputRefreshResult(prevStats, newStats, duration)
+	return outputRefreshResult(prevStats, newStats, duration, backend)
 }
 
 func refreshBackend(cmd *cobra.Command) (aws.Backend, error) {
-	if !backendWasExplicit(cmd) {
-		return aws.BackendSSM, nil
-	}
-	return requireConcreteBackend(cmd, "refresh", false)
+	return selectedBackend(cmd)
 }
 
-func outputRefreshResult(prev, current cache.CacheStats, duration time.Duration) error {
+func outputRefreshResult(prev, current cache.CacheStats, duration time.Duration, backend aws.Backend) error {
 	if globalOpts.Output == "json" {
-		result := struct {
-			TotalParameters int     `json:"total_parameters"`
-			PreviousCount   int     `json:"previous_count"`
-			Region          string  `json:"region"`
-			LastRefresh     string  `json:"last_refresh"`
-			DurationSeconds float64 `json:"duration_seconds"`
-			Added           int     `json:"added,omitempty"`
-			Removed         int     `json:"removed,omitempty"`
-		}{
-			TotalParameters: current.TotalEntries,
-			PreviousCount:   prev.TotalEntries,
-			Region:          current.Region,
-			LastRefresh:     current.LastRefresh.Format(time.RFC3339),
-			DurationSeconds: duration.Seconds(),
+		result := map[string]any{
+			"previous_count":   prev.TotalEntries,
+			"region":           current.Region,
+			"last_refresh":     current.LastRefresh.Format(time.RFC3339),
+			"duration_seconds": duration.Seconds(),
+		}
+		if backend == aws.BackendSecretsManager {
+			result["backend"] = backend
+			result["total_secrets"] = current.TotalEntries
+		} else {
+			result["total_parameters"] = current.TotalEntries
 		}
 
 		if current.TotalEntries > prev.TotalEntries {
-			result.Added = current.TotalEntries - prev.TotalEntries
+			result["added"] = current.TotalEntries - prev.TotalEntries
 		} else if current.TotalEntries < prev.TotalEntries {
-			result.Removed = prev.TotalEntries - current.TotalEntries
+			result["removed"] = prev.TotalEntries - current.TotalEntries
 		}
 
 		encoder := json.NewEncoder(os.Stdout)
@@ -176,15 +174,19 @@ func outputRefreshResult(prev, current cache.CacheStats, duration time.Duration)
 	color.Green("✓ Cache refreshed successfully")
 	fmt.Println()
 
+	resourceName := "parameters"
+	if backend == aws.BackendSecretsManager {
+		resourceName = "secrets"
+	}
 	color.Cyan("Statistics:")
-	fmt.Printf("  Total parameters: %d\n", current.TotalEntries)
+	fmt.Printf("  Total %s: %d\n", resourceName, current.TotalEntries)
 
 	// Show change
 	diff := current.TotalEntries - prev.TotalEntries
 	if diff > 0 {
-		color.Green("  Change: +%d new parameters\n", diff)
+		color.Green("  Change: +%d new %s\n", diff, resourceName)
 	} else if diff < 0 {
-		color.Yellow("  Change: %d parameters removed\n", -diff)
+		color.Yellow("  Change: %d %s removed\n", -diff, resourceName)
 	} else if prev.TotalEntries > 0 {
 		fmt.Println("  Change: no change")
 	}

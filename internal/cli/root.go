@@ -24,7 +24,7 @@ func NewRootCommand(version, commit, buildTime string) *cobra.Command {
 	rootCmd = &cobra.Command{
 		Use:           "clerk",
 		Short:         "Discover and manage secrets in AWS",
-		Long:          `clerk - Discover secrets in AWS Parameter Store and Secrets Manager, and manage Parameter Store parameters`,
+		Long:          `clerk - Discover and manage secrets in AWS Parameter Store and Secrets Manager`,
 		SilenceErrors: true,
 		SilenceUsage:  true,
 	}
@@ -36,7 +36,7 @@ func NewRootCommand(version, commit, buildTime string) *cobra.Command {
 	// Note: region default is empty to allow config file to override
 	rootCmd.PersistentFlags().StringVar(&globalOpts.Region, "region", "", "AWS region (defaults to config file region)")
 	rootCmd.PersistentFlags().StringVar(&globalOpts.Profile, "profile", "", "AWS profile to use")
-	rootCmd.PersistentFlags().StringVar(&globalOpts.Backend, "backend", "all", "Secret backend (all, ssm, or secretsmanager)")
+	rootCmd.PersistentFlags().StringVar(&globalOpts.Backend, "backend", "ssm", "Secret backend (ssm or secretsmanager)")
 	rootCmd.PersistentFlags().StringVar(&globalOpts.Output, "output", "plain", "Output format (plain or json)")
 	rootCmd.PersistentFlags().BoolVar(&globalOpts.Verbose, "verbose", false, "Enable verbose output")
 

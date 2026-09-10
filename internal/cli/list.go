@@ -3,7 +3,6 @@ package cli
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -24,23 +23,6 @@ var (
 	listShowTags bool
 )
 
-type discoveryScope struct {
-	Partition string      `json:"partition"`
-	AccountID string      `json:"account_id"`
-	Region    string      `json:"region"`
-	Backend   aws.Backend `json:"backend"`
-	Status    string      `json:"status"`
-	Complete  bool        `json:"complete"`
-	Error     string      `json:"error,omitempty"`
-}
-
-type discoveryEnvelope struct {
-	SchemaVersion int                `json:"schema_version"`
-	Items         []cache.CacheEntry `json:"items"`
-	Scopes        []discoveryScope   `json:"scopes"`
-	Completeness  string             `json:"completeness"`
-}
-
 type legacySSMListEntry struct {
 	Name             string                      `json:"name"`
 	Type             string                      `json:"type"`
@@ -54,26 +36,22 @@ type legacySSMListEntry struct {
 }
 
 type metadataProvider struct {
-	scope discoveryScope
-	list  func(context.Context, string, bool) ([]cache.CacheEntry, error)
+	list func(context.Context, string, bool) ([]cache.CacheEntry, error)
 }
 
 // InitListCommand initializes the LIST command.
 func InitListCommand() *cobra.Command {
 	listCmd := &cobra.Command{
 		Use:   "list [pattern]",
-		Short: "List metadata from Parameter Store and Secrets Manager",
+		Short: "List metadata from one secret backend",
 		Long: `List secret metadata from the selected backend without retrieving values.
 
-The default --backend all aggregates Parameter Store and Secrets Manager. A
-provider failure still emits results from successful providers, then returns a
-nonzero status. Explicit --backend ssm --output json preserves the legacy array.
+Parameter Store is used by default. SSM output preserves the legacy format.
 
 Examples:
   clerk list
   clerk list "/dev/*" --backend ssm
-  clerk list "*database*" --backend secretsmanager
-  clerk list --backend all --output json`,
+  clerk list "*database*" --backend secretsmanager`,
 		Args: cobra.MaximumNArgs(1),
 		PreRunE: func(cmd *cobra.Command, _ []string) error {
 			_, err := selectedBackend(cmd)
@@ -117,33 +95,29 @@ func runList(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("failed to resolve AWS context: %w", err)
 	}
-	providers, err := listProviders(resolved, awsOpts, cfg, backend)
+	provider, err := listProvider(resolved, awsOpts, cfg, backend)
 	if err != nil {
 		return err
 	}
-	items, scopes, discoveryErr := aggregateMetadata(ctx, providers, pattern, listShowTags)
-	sortListEntries(items, sortBy)
-	if outputErr := outputList(items, scopes, backend, listShowTags); outputErr != nil {
-		return outputErr
+	items, err := provider.list(ctx, pattern, listShowTags)
+	if err != nil {
+		return fmt.Errorf("failed to list %s metadata: %w", backend, err)
 	}
-	return discoveryErr
+	sortListEntries(items, sortBy)
+	return outputList(items, backend, listShowTags)
 }
 
-func listProviders(resolved *aws.ResolvedContext, opts aws.ClientOptions, cfg *config.Config, selected aws.Backend) ([]metadataProvider, error) {
-	makeScope := func(backend aws.Backend) discoveryScope {
-		return discoveryScope{Partition: resolved.Partition, AccountID: resolved.AccountID, Region: resolved.Region, Backend: backend}
-	}
-	var providers []metadataProvider
-	if selected == aws.BackendAll || selected == aws.BackendSSM {
+func listProvider(resolved *aws.ResolvedContext, opts aws.ClientOptions, cfg *config.Config, selected aws.Backend) (metadataProvider, error) {
+	if selected == aws.BackendSSM {
 		client, err := aws.NewClientFromContext(resolved, opts)
 		if err != nil {
-			return nil, fmt.Errorf("failed to create SSM client: %w", err)
+			return metadataProvider{}, fmt.Errorf("failed to create SSM client: %w", err)
 		}
 		manager, err := cache.NewManagerForBackend(cfg, resolved.Partition, resolved.Region, resolved.AccountID, aws.BackendSSM)
 		if err != nil {
-			return nil, fmt.Errorf("failed to initialize SSM cache: %w", err)
+			return metadataProvider{}, fmt.Errorf("failed to initialize SSM cache: %w", err)
 		}
-		providers = append(providers, metadataProvider{scope: makeScope(aws.BackendSSM), list: func(ctx context.Context, pattern string, showTags bool) ([]cache.CacheEntry, error) {
+		return metadataProvider{list: func(ctx context.Context, pattern string, showTags bool) ([]cache.CacheEntry, error) {
 			if !manager.IsExpired() {
 				entries := manager.Search(pattern)
 				if showTags {
@@ -189,18 +163,18 @@ func listProviders(resolved *aws.ResolvedContext, opts aws.ClientOptions, cfg *c
 				return nil, fmt.Errorf("persist SSM metadata snapshot: %w", err)
 			}
 			return filterListEntries(entries, pattern), nil
-		}})
+		}}, nil
 	}
-	if selected == aws.BackendAll || selected == aws.BackendSecretsManager {
+	if selected == aws.BackendSecretsManager {
 		client, err := aws.NewSecretsManagerClient(resolved)
 		if err != nil {
-			return nil, fmt.Errorf("failed to create Secrets Manager client: %w", err)
+			return metadataProvider{}, fmt.Errorf("failed to create Secrets Manager client: %w", err)
 		}
 		manager, err := cache.NewManagerForBackend(cfg, resolved.Partition, resolved.Region, resolved.AccountID, aws.BackendSecretsManager)
 		if err != nil {
-			return nil, fmt.Errorf("failed to initialize Secrets Manager cache: %w", err)
+			return metadataProvider{}, fmt.Errorf("failed to initialize Secrets Manager cache: %w", err)
 		}
-		providers = append(providers, metadataProvider{scope: makeScope(aws.BackendSecretsManager), list: func(ctx context.Context, pattern string, _ bool) ([]cache.CacheEntry, error) {
+		return metadataProvider{list: func(ctx context.Context, pattern string, _ bool) ([]cache.CacheEntry, error) {
 			if !manager.IsExpired() {
 				return manager.Search(pattern), nil
 			}
@@ -224,33 +198,9 @@ func listProviders(resolved *aws.ResolvedContext, opts aws.ClientOptions, cfg *c
 				return nil, fmt.Errorf("persist Secrets Manager metadata snapshot: %w", err)
 			}
 			return filterListEntries(entries, pattern), nil
-		}})
+		}}, nil
 	}
-	return providers, nil
-}
-
-func aggregateMetadata(ctx context.Context, providers []metadataProvider, pattern string, showTags bool) ([]cache.CacheEntry, []discoveryScope, error) {
-	items := make([]cache.CacheEntry, 0)
-	scopes := make([]discoveryScope, 0, len(providers))
-	var failures []error
-	for _, provider := range providers {
-		entries, err := provider.list(ctx, pattern, showTags)
-		scope := provider.scope
-		if err != nil {
-			scope.Status = "failed"
-			scope.Error = err.Error()
-			failures = append(failures, fmt.Errorf("%s: %w", scope.Backend, err))
-		} else {
-			scope.Status = "succeeded"
-			scope.Complete = true
-			items = append(items, entries...)
-		}
-		scopes = append(scopes, scope)
-	}
-	if len(failures) == 0 {
-		return items, scopes, nil
-	}
-	return items, scopes, fmt.Errorf("metadata discovery incomplete: %w", errors.Join(failures...))
+	return metadataProvider{}, fmt.Errorf("unsupported backend %q", selected)
 }
 
 func filterListEntries(entries []cache.CacheEntry, pattern string) []cache.CacheEntry {
@@ -261,22 +211,6 @@ func filterListEntries(entries []cache.CacheEntry, pattern string) []cache.Cache
 		}
 	}
 	return result
-}
-
-func discoveryCompleteness(scopes []discoveryScope) string {
-	succeeded := 0
-	for _, scope := range scopes {
-		if scope.Complete {
-			succeeded++
-		}
-	}
-	if succeeded == len(scopes) {
-		return "complete"
-	}
-	if succeeded > 0 {
-		return "partial"
-	}
-	return "failed"
 }
 
 func sortListEntries(entries []cache.CacheEntry, by string) {
@@ -324,16 +258,13 @@ func extractBasePath(pattern string) string {
 	return pattern
 }
 
-func outputList(entries []cache.CacheEntry, scopes []discoveryScope, selected aws.Backend, showTags bool) error {
-	return outputListTo(os.Stdout, os.Stderr, entries, scopes, selected, showTags)
+func outputList(entries []cache.CacheEntry, selected aws.Backend, showTags bool) error {
+	return outputListTo(os.Stdout, os.Stderr, entries, selected, showTags)
 }
 
-func outputListTo(stdout, stderr io.Writer, entries []cache.CacheEntry, scopes []discoveryScope, selected aws.Backend, showTags bool) error {
+func outputListTo(stdout, stderr io.Writer, entries []cache.CacheEntry, selected aws.Backend, showTags bool) error {
 	if entries == nil {
 		entries = []cache.CacheEntry{}
-	}
-	if scopes == nil {
-		scopes = []discoveryScope{}
 	}
 	if globalOpts.Output == "json" {
 		if !showTags {
@@ -344,18 +275,18 @@ func outputListTo(stdout, stderr io.Writer, entries []cache.CacheEntry, scopes [
 		if selected == aws.BackendSSM {
 			return encoder.Encode(legacySSMListEntries(entries))
 		}
-		return encoder.Encode(discoveryEnvelope{SchemaVersion: 1, Items: entries, Scopes: scopes, Completeness: discoveryCompleteness(scopes)})
+		return encoder.Encode(entries)
 	}
 	if len(entries) == 0 {
-		if discoveryCompleteness(scopes) == "complete" {
-			_, _ = fmt.Fprintln(stderr, "No secrets found")
+		if selected == aws.BackendSSM {
+			_, _ = fmt.Fprintln(stderr, "No parameters found")
 		} else {
-			_, _ = fmt.Fprintln(stderr, "No results available; one or more backends failed")
+			_, _ = fmt.Fprintln(stderr, "No secrets found")
 		}
 		return nil
 	}
 	w := tabwriter.NewWriter(stdout, 0, 0, 2, ' ', 0)
-	header := "BACKEND\tNAME\tTYPE\tVERSION\tMODIFIED"
+	header := "NAME\tTYPE\tVERSION\tMODIFIED"
 	if showTags {
 		header += "\tTAGS"
 	}
@@ -372,13 +303,17 @@ func outputListTo(stdout, stderr io.Writer, entries []cache.CacheEntry, scopes [
 			entryType = "-"
 		}
 		if showTags {
-			_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n", entry.Identity.Backend, entry.Name, entryType, version, modified, formatListTags(entry))
+			_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n", entry.Name, entryType, version, modified, formatListTags(entry))
 		} else {
-			_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n", entry.Identity.Backend, entry.Name, entryType, version, modified)
+			_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", entry.Name, entryType, version, modified)
 		}
 	}
 	_ = w.Flush()
-	fmt.Fprintf(stderr, "\nTotal: %d secrets\n", len(entries))
+	if selected == aws.BackendSSM {
+		fmt.Fprintf(stderr, "\nTotal: %d parameters\n", len(entries))
+	} else {
+		fmt.Fprintf(stderr, "\nTotal: %d secrets\n", len(entries))
+	}
 	return nil
 }
 

@@ -48,7 +48,7 @@ func DefaultFixtureConfig() *FixtureConfig {
 	}
 }
 
-// FixtureGenerator drives PutParameter calls against an SSM endpoint (usually moto).
+// FixtureGenerator drives SSM and Secrets Manager fixture calls against an endpoint (usually moto).
 type FixtureGenerator struct {
 	client  *ssm.Client
 	secrets *secretsmanager.Client
@@ -218,11 +218,12 @@ func (g *FixtureGenerator) GenerateSpecificParameters(ctx context.Context) ([]st
 }
 
 type secretFixture struct {
-	name      string
-	value     string
-	binary    []byte
-	tags      map[string]string
-	versioned bool
+	name            string
+	value           string
+	binary          []byte
+	tags            map[string]string
+	versioned       bool
+	plannedDeletion bool
 }
 
 func fixtureSecrets() []secretFixture {
@@ -231,6 +232,7 @@ func fixtureSecrets() []secretFixture {
 		{name: "/test/plain/text", value: "plain secret text", tags: map[string]string{"kind": "text"}},
 		{name: "/test/json/unicode", value: `{"message":"こんにちは, café","emoji":"🔐","enabled":true}`, tags: map[string]string{"kind": "json", "encoding": "unicode"}},
 		{name: "/test/binary/certificate", binary: []byte{0x00, 0x01, 0x02, 0xfe, 0xff, 'f', 'i', 'x'}, tags: map[string]string{"kind": "binary"}},
+		{name: "/test/planned/deletion", value: "scheduled for recovery", tags: map[string]string{"lifecycle": "planned-deletion"}, plannedDeletion: true},
 	}
 }
 
@@ -264,25 +266,31 @@ func (g *FixtureGenerator) Populate(ctx context.Context) (FixtureResult, error) 
 			return result, fmt.Errorf("CreateSecret %s: %w", fixture.name, createErr)
 		}
 		result.Secrets = append(result.Secrets, fixture.name)
-		if !fixture.versioned {
-			continue
-		}
-		version, versionErr := g.secrets.PutSecretValue(ctx, &secretsmanager.PutSecretValueInput{
-			SecretId:           aws.String(fixture.name),
-			ClientRequestToken: aws.String("fixture-version-2"),
-			SecretString:       aws.String(`{"password":"rotated-secret","version":2}`),
-			VersionStages:      []string{"AWSCURRENT", "fixture-rotated"},
-		})
-		if versionErr != nil {
-			result.Warnings = append(result.Warnings, fmt.Sprintf("%s: version creation unavailable: %v", fixture.name, versionErr))
-			continue
-		}
-		if created.VersionId != nil && version.VersionId != nil {
-			_, labelErr := g.secrets.UpdateSecretVersionStage(ctx, &secretsmanager.UpdateSecretVersionStageInput{
-				SecretId: aws.String(fixture.name), VersionStage: aws.String("fixture-initial"), MoveToVersionId: created.VersionId,
+		if fixture.versioned {
+			version, versionErr := g.secrets.PutSecretValue(ctx, &secretsmanager.PutSecretValueInput{
+				SecretId:           aws.String(fixture.name),
+				ClientRequestToken: aws.String("fixture-version-token-0000000000"),
+				SecretString:       aws.String(`{"password":"rotated-secret","version":2}`),
+				VersionStages:      []string{"AWSCURRENT", "fixture-rotated"},
 			})
-			if labelErr != nil {
-				result.Warnings = append(result.Warnings, fmt.Sprintf("%s: custom staging label unavailable: %v", fixture.name, labelErr))
+			if versionErr != nil {
+				result.Warnings = append(result.Warnings, fmt.Sprintf("%s: version creation unavailable: %v", fixture.name, versionErr))
+			} else if created.VersionId != nil && version.VersionId != nil {
+				_, labelErr := g.secrets.UpdateSecretVersionStage(ctx, &secretsmanager.UpdateSecretVersionStageInput{
+					SecretId: aws.String(fixture.name), VersionStage: aws.String("fixture-initial"), MoveToVersionId: created.VersionId,
+				})
+				if labelErr != nil {
+					result.Warnings = append(result.Warnings, fmt.Sprintf("%s: custom staging label unavailable: %v", fixture.name, labelErr))
+				}
+			}
+		}
+		if fixture.plannedDeletion {
+			_, deleteErr := g.secrets.DeleteSecret(ctx, &secretsmanager.DeleteSecretInput{
+				SecretId:             aws.String(fixture.name),
+				RecoveryWindowInDays: aws.Int64(7),
+			})
+			if deleteErr != nil {
+				result.Warnings = append(result.Warnings, fmt.Sprintf("%s: planned deletion unavailable: %v", fixture.name, deleteErr))
 			}
 		}
 	}

@@ -2,7 +2,6 @@ package ui
 
 import (
 	"fmt"
-	"sort"
 	"strings"
 	"time"
 
@@ -147,9 +146,6 @@ func (m Model) renderBrowseView() string {
 	if m.state.FilterType != FilterAll {
 		filterBadge = searchStyle.Render("[" + m.state.FilterType.String() + "]")
 	}
-	if m.state.BackendFilter != "" && m.state.BackendFilter != "all" {
-		filterBadge += searchStyle.Render("[backend: " + backendLabel(m.state.BackendFilter) + "]")
-	}
 
 	// Search bar (always visible, fixed at top)
 	if m.state.SearchActive {
@@ -219,7 +215,7 @@ func (m Model) renderBrowseView() string {
 		rowCount = len(m.state.TreeNodes)
 	}
 	if rowCount == 0 {
-		lines = append(lines, dimStyle.Render("    No SSM/SM resources found"))
+		lines = append(lines, dimStyle.Render("    No SSM parameters found"))
 		// Pad with empty lines to fill space
 		for i := len(lines); i < m.state.Height-2; i++ {
 			lines = append(lines, "")
@@ -260,7 +256,7 @@ func (m Model) renderBrowseView() string {
 		statusLine = statusStyle.Render("  ✓ " + m.state.StatusMessage)
 	} else {
 		// Stats with offline mode indicator
-		stats := fmt.Sprintf("%d/%d SSM/SM resources", len(m.state.FilteredItems), len(m.state.Entries))
+		stats := fmt.Sprintf("%d/%d SSM parameters", len(m.state.FilteredItems), len(m.state.Entries))
 
 		// Add offline mode indicator or cache age
 		if m.state.OfflineMode {
@@ -284,13 +280,13 @@ func (m Model) renderBrowseView() string {
 		help = "  " + renderHelp(
 			"↑↓", "navigate", "d", "describe", "e", "edit", "c", "copy",
 			"m", "move", "p", "copy-to", "space", "expand",
-			"s", "sort("+sortLabel+")", "S", "reverse", "f", "type", "b", "backend", "r", "refresh", "/", "search", "q", "quit",
+			"s", "sort("+sortLabel+")", "S", "reverse", "f", "type", "r", "refresh", "/", "search", "q", "quit",
 		) + "  "
 	} else {
 		help = "  " + renderHelp(
 			"↑↓", "navigate", "d", "describe", "e", "edit", "c", "copy",
 			"m", "move", "p", "copy-to", "t", "tree",
-			"s", "sort("+sortLabel+")", "S", "reverse", "f", "type", "b", "backend", "r", "refresh", "/", "search", "q", "quit",
+			"s", "sort("+sortLabel+")", "S", "reverse", "f", "type", "r", "refresh", "/", "search", "q", "quit",
 		) + "  "
 	}
 	lines = append(lines, help)
@@ -307,16 +303,10 @@ func tagCountStr(entry cache.CacheEntry) string {
 }
 
 func entryTypeLabel(entry cache.CacheEntry) string {
-	if entry.Identity.Backend == aws.BackendSecretsManager || entry.Type == "" {
-		return "-"
-	}
 	return entry.Type
 }
 
 func entryVersionLabel(entry cache.CacheEntry) string {
-	if entry.Identity.Backend == aws.BackendSecretsManager {
-		return "-"
-	}
 	return fmt.Sprintf("%d", entry.Version)
 }
 
@@ -342,7 +332,7 @@ func (m Model) renderListItems(b *strings.Builder, start, end int, showModified,
 
 	for i := start; i < end; i++ {
 		entry := m.state.FilteredItems[i]
-		name := truncateString("["+backendLabel(entry.Identity.Backend)+"] "+entry.Name, nameWidth-2)
+		name := truncateString(entry.Name, nameWidth-2)
 
 		if i == m.state.SelectedIndex {
 			// Selected row: single highlight color across entire line
@@ -415,7 +405,7 @@ func (m Model) renderTreeItems(b *strings.Builder, start, end int, showModified,
 				if availableWidth < 10 {
 					availableWidth = 10
 				}
-				name := truncateString("["+backendLabel(entry.Identity.Backend)+"] "+node.Name, availableWidth-2)
+				name := truncateString(node.Name, availableWidth-2)
 				line = fmt.Sprintf("  %s%s%-*s   %-12s   %8s", indent, prefix, availableWidth, name, entryTypeLabel(*entry), entryVersionLabel(*entry))
 				if showTags {
 					line += fmt.Sprintf("   %4s", tagCountStr(*entry))
@@ -444,7 +434,7 @@ func (m Model) renderTreeItems(b *strings.Builder, start, end int, showModified,
 			if availableWidth < 10 {
 				availableWidth = 10
 			}
-			name := truncateString("["+backendLabel(entry.Identity.Backend)+"] "+node.Name, availableWidth-2)
+			name := truncateString(node.Name, availableWidth-2)
 			b.WriteString("  " + indent + prefix +
 				nameColStyle.Render(fmt.Sprintf("%-*s", availableWidth, name)) + "   " +
 				typeColStyle.Render(fmt.Sprintf("%-12s", entryTypeLabel(*entry))) + "   " +
@@ -472,7 +462,7 @@ func (m Model) renderDescribeView() string {
 	entry := m.state.DescribeEntry
 
 	// Title - full width
-	titleText := fmt.Sprintf(" DESCRIBE %s | account %s | region %s ", backendLabel(entry.Identity.Backend), m.scope.AccountID, m.scope.Region)
+	titleText := fmt.Sprintf(" DESCRIBE SSM | account %s | region %s ", m.scope.AccountID, m.scope.Region)
 	titlePad := m.state.Width - lipgloss.Width(titleText)
 	if titlePad < 0 {
 		titlePad = 0
@@ -653,7 +643,7 @@ func (m Model) renderValuePanel(width, height int) string {
 	var lines []string
 
 	// Header with underline
-	header := panelHeaderStyle.Render(backendLabel(m.state.DescribeIdentity.Backend) + " VALUE")
+	header := panelHeaderStyle.Render("SSM VALUE")
 	if m.state.DescribeValueKind != "" {
 		kind := string(m.state.DescribeValueKind)
 		if m.state.DescribeValueKind == aws.ValueBinary {
@@ -846,7 +836,7 @@ func (m Model) renderDescribeBox(entry *cache.CacheEntry) string {
 		if nameWidth < 20 {
 			nameWidth = 20
 		}
-		name := "[" + backendLabel(entry.Identity.Backend) + "] " + entry.Name
+		name := entry.Name
 		if len(name) > nameWidth-2 {
 			name = name[:nameWidth-2]
 		}
@@ -858,9 +848,6 @@ func (m Model) renderDescribeBox(entry *cache.CacheEntry) string {
 			versionColStyle.Render(fmt.Sprintf("%8s", entryVersionLabel(*entry))) + "   " +
 			modifiedColStyle.Render(fmt.Sprintf("%16s", modifiedStr)) + "  "
 
-		if entry.Identity.Backend == "secretsmanager" {
-			return info + m.renderSecretMetadata(entry)
-		}
 		if len(entry.Tags) > 0 {
 			var tagPairs []string
 			for k, v := range entry.Tags {
@@ -876,7 +863,7 @@ func (m Model) renderDescribeBox(entry *cache.CacheEntry) string {
 	if nameWidth < 20 {
 		nameWidth = 20
 	}
-	name := "[" + backendLabel(entry.Identity.Backend) + "] " + entry.Name
+	name := entry.Name
 	if len(name) > nameWidth-2 {
 		name = name[:nameWidth-2]
 	}
@@ -885,9 +872,6 @@ func (m Model) renderDescribeBox(entry *cache.CacheEntry) string {
 		typeColStyle.Render(fmt.Sprintf("%-12s", entryTypeLabel(*entry))) + "   " +
 		versionColStyle.Render(fmt.Sprintf("%8s", entryVersionLabel(*entry)))
 
-	if entry.Identity.Backend == "secretsmanager" {
-		return info + m.renderSecretMetadata(entry)
-	}
 	if len(entry.Tags) > 0 {
 		var tagPairs []string
 		for k, v := range entry.Tags {
@@ -899,63 +883,6 @@ func (m Model) renderDescribeBox(entry *cache.CacheEntry) string {
 	return info
 }
 
-func (m Model) renderSecretMetadata(entry *cache.CacheEntry) string {
-	metadata, ok := m.secretMetadata[entry.Identity]
-	if !ok {
-		return "\n" + dimStyle.Render("  SM metadata unavailable from cache; version metadata is shown below")
-	}
-	lines := []string{"  SM ARN: " + metadata.ARN}
-	if metadata.Description != "" {
-		lines = append(lines, "  Description: "+metadata.Description)
-	}
-	if metadata.KMSKeyID != "" {
-		lines = append(lines, "  KMS key: "+metadata.KMSKeyID)
-	}
-	if metadata.DeletedDate != nil {
-		lines = append(lines, "  Deletion scheduled: "+metadata.DeletedDate.Format(time.RFC3339))
-	}
-	if metadata.RotationEnabled != nil {
-		rotation := "disabled"
-		if *metadata.RotationEnabled {
-			rotation = "enabled"
-		}
-		lines = append(lines, "  Rotation: "+rotation)
-	}
-	if metadata.RotationRules != nil {
-		rules := metadata.RotationRules
-		if rules.ScheduleExpression != "" {
-			lines = append(lines, "  Rotation schedule: "+rules.ScheduleExpression)
-		} else if rules.AutomaticallyAfterDays != nil {
-			lines = append(lines, fmt.Sprintf("  Rotation interval: %d days", *rules.AutomaticallyAfterDays))
-		}
-	}
-	if metadata.LastRotatedDate != nil {
-		lines = append(lines, "  Last rotated: "+metadata.LastRotatedDate.Format(time.RFC3339))
-	}
-	if metadata.NextRotationDate != nil {
-		lines = append(lines, "  Next rotation: "+metadata.NextRotationDate.Format(time.RFC3339))
-	}
-	if metadata.PrimaryRegion != "" {
-		if metadata.Replica {
-			lines = append(lines, "  Replication: replica of "+metadata.PrimaryRegion)
-		} else {
-			lines = append(lines, "  Replication: primary in "+metadata.PrimaryRegion)
-		}
-	}
-	if metadata.OwningService != "" {
-		lines = append(lines, "  Managed by: "+metadata.OwningService)
-	}
-	if len(metadata.Tags) > 0 {
-		var tags []string
-		for key, value := range metadata.Tags {
-			tags = append(tags, key+"="+value)
-		}
-		sort.Strings(tags)
-		lines = append(lines, "  Tags: "+strings.Join(tags, ", "))
-	}
-	return "\n" + dimStyle.Render(strings.Join(lines, "\n"))
-}
-
 // renderConfirmDialog renders the confirmation dialog overlay
 func (m Model) renderConfirmDialog() string {
 	var b strings.Builder
@@ -964,7 +891,7 @@ func (m Model) renderConfirmDialog() string {
 	case "delete":
 		b.WriteString(warningStyle.Render("⚠ CONFIRM DELETE"))
 		b.WriteString("\n\n")
-		fmt.Fprintf(&b, "You are about to delete:\n[%s] %s\n\n", backendLabel(m.state.Confirm.Identity.Backend), m.state.Confirm.Target)
+		fmt.Fprintf(&b, "You are about to delete:\n[SSM] %s\n\n", m.state.Confirm.Target)
 		b.WriteString(warningStyle.Render("This action cannot be undone!"))
 		b.WriteString("\n\n")
 		b.WriteString(promptStyle.Render("Type 'delete me' to confirm: "))
@@ -972,13 +899,13 @@ func (m Model) renderConfirmDialog() string {
 	case "move":
 		b.WriteString(warningStyle.Render("MOVE/RENAME PARAMETER"))
 		b.WriteString("\n\n")
-		fmt.Fprintf(&b, "From: [%s] %s\n\n", backendLabel(m.state.Confirm.Identity.Backend), m.state.Confirm.Target)
+		fmt.Fprintf(&b, "From: [SSM] %s\n\n", m.state.Confirm.Target)
 		b.WriteString(promptStyle.Render("To: "))
 		b.WriteString(inputStyle.Render(m.state.Confirm.Input))
 	case "copy":
 		b.WriteString(warningStyle.Render("COPY PARAMETER"))
 		b.WriteString("\n\n")
-		fmt.Fprintf(&b, "From: [%s] %s\n\n", backendLabel(m.state.Confirm.Identity.Backend), m.state.Confirm.Target)
+		fmt.Fprintf(&b, "From: [SSM] %s\n\n", m.state.Confirm.Target)
 		b.WriteString(promptStyle.Render("To: "))
 		b.WriteString(inputStyle.Render(m.state.Confirm.Input))
 	}

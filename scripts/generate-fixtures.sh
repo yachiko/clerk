@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Generate N random parameters in a running moto server, useful for ad-hoc
-# manual exploration of clerk against a populated Parameter Store.
+# Generate deterministic SSM and Secrets Manager fixtures plus N random SSM
+# parameters in a running moto server, useful for manual clerk exploration.
 
 set -euo pipefail
 
@@ -11,7 +11,7 @@ cd "$PROJECT_ROOT"
 MOTO_ENDPOINT="${MOTO_ENDPOINT:-http://localhost:5000}"
 NUM_PARAMS="${NUM_PARAMS:-500}"
 
-echo "Generating $NUM_PARAMS parameters against $MOTO_ENDPOINT..."
+echo "Generating SSM and Secrets Manager fixtures plus $NUM_PARAMS SSM parameters against $MOTO_ENDPOINT..."
 MOTO_ENDPOINT="$MOTO_ENDPOINT" NUM_PARAMS="$NUM_PARAMS" \
     go run ./cmd/fixtures \
         -endpoint "$MOTO_ENDPOINT" \

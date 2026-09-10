@@ -2,7 +2,9 @@ package aws
 
 import (
 	"context"
+	"crypto/rand"
 	"fmt"
+	"sort"
 	"strings"
 
 	sdkaws "github.com/aws/aws-sdk-go-v2/aws"
@@ -12,11 +14,19 @@ import (
 
 type secretsManagerAPI interface {
 	ListSecrets(context.Context, *secretsmanager.ListSecretsInput, ...func(*secretsmanager.Options)) (*secretsmanager.ListSecretsOutput, error)
+	DescribeSecret(context.Context, *secretsmanager.DescribeSecretInput, ...func(*secretsmanager.Options)) (*secretsmanager.DescribeSecretOutput, error)
 	GetSecretValue(context.Context, *secretsmanager.GetSecretValueInput, ...func(*secretsmanager.Options)) (*secretsmanager.GetSecretValueOutput, error)
 	ListSecretVersionIds(context.Context, *secretsmanager.ListSecretVersionIdsInput, ...func(*secretsmanager.Options)) (*secretsmanager.ListSecretVersionIdsOutput, error)
+	CreateSecret(context.Context, *secretsmanager.CreateSecretInput, ...func(*secretsmanager.Options)) (*secretsmanager.CreateSecretOutput, error)
+	PutSecretValue(context.Context, *secretsmanager.PutSecretValueInput, ...func(*secretsmanager.Options)) (*secretsmanager.PutSecretValueOutput, error)
+	TagResource(context.Context, *secretsmanager.TagResourceInput, ...func(*secretsmanager.Options)) (*secretsmanager.TagResourceOutput, error)
+	UntagResource(context.Context, *secretsmanager.UntagResourceInput, ...func(*secretsmanager.Options)) (*secretsmanager.UntagResourceOutput, error)
+	DeleteSecret(context.Context, *secretsmanager.DeleteSecretInput, ...func(*secretsmanager.Options)) (*secretsmanager.DeleteSecretOutput, error)
+	RestoreSecret(context.Context, *secretsmanager.RestoreSecretInput, ...func(*secretsmanager.Options)) (*secretsmanager.RestoreSecretOutput, error)
 }
 
-// SecretsManagerClient provides read-only access to AWS Secrets Manager.
+// SecretsManagerClient provides focused metadata, value, and mutation access to
+// AWS Secrets Manager.
 type SecretsManagerClient struct {
 	api       secretsManagerAPI
 	partition string
@@ -24,8 +34,7 @@ type SecretsManagerClient struct {
 	region    string
 }
 
-// NewSecretsManagerClient constructs a read-only adapter from an already
-// resolved AWS context.
+// NewSecretsManagerClient constructs an adapter from an already resolved AWS context.
 func NewSecretsManagerClient(resolved *ResolvedContext) (*SecretsManagerClient, error) {
 	if resolved == nil {
 		return nil, fmt.Errorf("resolved AWS context is required")
@@ -34,6 +43,39 @@ func NewSecretsManagerClient(resolved *ResolvedContext) (*SecretsManagerClient, 
 		return nil, fmt.Errorf("AWS region is not configured; pass --region, set config region, or configure AWS_REGION/a shared AWS profile")
 	}
 	return newSecretsManagerClient(resolved, secretsmanager.NewFromConfig(resolved.Config))
+}
+
+// DescribeSecret retrieves metadata without retrieving any secret value.
+func (c *SecretsManagerClient) DescribeSecret(ctx context.Context, secretID string) (*SecretMetadata, error) {
+	if strings.TrimSpace(secretID) == "" {
+		return nil, fmt.Errorf("secret ID is required")
+	}
+	output, err := c.api.DescribeSecret(ctx, &secretsmanager.DescribeSecretInput{SecretId: sdkaws.String(secretID)})
+	if err != nil {
+		return nil, fmt.Errorf("failed to describe secret: %w", err)
+	}
+	if output == nil {
+		return nil, fmt.Errorf("failed to describe secret: Secrets Manager returned an empty response")
+	}
+	name, secretARN := sdkaws.ToString(output.Name), sdkaws.ToString(output.ARN)
+	if name == "" || secretARN == "" {
+		return nil, fmt.Errorf("failed to describe secret: Secrets Manager returned a secret without a name or ARN")
+	}
+	tags := tagsToMap(output.Tags)
+	var rules *SecretRotationRules
+	if output.RotationRules != nil {
+		rules = &SecretRotationRules{AutomaticallyAfterDays: output.RotationRules.AutomaticallyAfterDays, Duration: sdkaws.ToString(output.RotationRules.Duration), ScheduleExpression: sdkaws.ToString(output.RotationRules.ScheduleExpression)}
+	}
+	primaryRegion := sdkaws.ToString(output.PrimaryRegion)
+	return &SecretMetadata{
+		Identity: c.identity(secretARN), Name: name, ARN: secretARN,
+		Description: sdkaws.ToString(output.Description), KMSKeyID: sdkaws.ToString(output.KmsKeyId), Tags: tags,
+		CreatedDate: output.CreatedDate, LastAccessedDate: output.LastAccessedDate, LastChangedDate: output.LastChangedDate, DeletedDate: output.DeletedDate,
+		RotationEnabled: output.RotationEnabled, RotationLambdaARN: sdkaws.ToString(output.RotationLambdaARN), RotationRules: rules,
+		LastRotatedDate: output.LastRotatedDate, NextRotationDate: output.NextRotationDate, VersionsToStages: cloneStages(output.VersionIdsToStages),
+		PrimaryRegion: primaryRegion, Replica: primaryRegion != "" && primaryRegion != c.region, OwningService: sdkaws.ToString(output.OwningService),
+		ExternalSecretType: sdkaws.ToString(output.Type), ExternalRotationRoleARN: sdkaws.ToString(output.ExternalSecretRotationRoleArn),
+	}, nil
 }
 
 func newSecretsManagerClient(resolved *ResolvedContext, api secretsManagerAPI) (*SecretsManagerClient, error) {
@@ -87,15 +129,7 @@ func (c *SecretsManagerClient) secretMetadata(entry smtypes.SecretListEntry) (Se
 		return SecretMetadata{}, fmt.Errorf("failed to list secrets: Secrets Manager returned a secret without a name or ARN")
 	}
 
-	tags := make(map[string]string, len(entry.Tags))
-	for _, tag := range entry.Tags {
-		if tag.Key != nil {
-			tags[*tag.Key] = sdkaws.ToString(tag.Value)
-		}
-	}
-	if len(tags) == 0 {
-		tags = nil
-	}
+	tags := tagsToMap(entry.Tags)
 
 	var rules *SecretRotationRules
 	if entry.RotationRules != nil {
@@ -129,6 +163,168 @@ func (c *SecretsManagerClient) secretMetadata(entry smtypes.SecretListEntry) (Se
 		ExternalSecretType:      sdkaws.ToString(entry.Type),
 		ExternalRotationRoleARN: sdkaws.ToString(entry.ExternalSecretRotationRoleArn),
 	}, nil
+}
+
+// CreateSecret creates a secret with exactly one text or binary initial value.
+func (c *SecretsManagerClient) CreateSecret(ctx context.Context, request CreateSecretRequest) (*CreateSecretResult, error) {
+	if strings.TrimSpace(request.Name) == "" {
+		return nil, fmt.Errorf("secret name is required")
+	}
+	if err := validateTags(request.Tags); err != nil {
+		return nil, err
+	}
+	input := &secretsmanager.CreateSecretInput{Name: sdkaws.String(request.Name), Description: optionalString(request.Description), KmsKeyId: optionalString(request.KMSKeyID), Tags: mapToTags(request.Tags)}
+	if err := setSecretValue(request.Value, &input.SecretString, &input.SecretBinary); err != nil {
+		return nil, err
+	}
+	token, err := newClientRequestToken()
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate create secret request token: %w", err)
+	}
+	input.ClientRequestToken = sdkaws.String(token)
+	output, err := c.api.CreateSecret(ctx, input)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create secret: %w", err)
+	}
+	if output == nil {
+		return nil, fmt.Errorf("failed to create secret: Secrets Manager returned an empty response")
+	}
+	name, secretARN, versionID := sdkaws.ToString(output.Name), sdkaws.ToString(output.ARN), sdkaws.ToString(output.VersionId)
+	if name == "" || secretARN == "" || versionID == "" {
+		return nil, fmt.Errorf("failed to create secret: Secrets Manager returned a result without a name, ARN, or version ID")
+	}
+	return &CreateSecretResult{Identity: c.identity(secretARN), Name: name, ARN: secretARN, VersionID: versionID}, nil
+}
+
+// PutSecretValue creates a new immutable text or binary secret version.
+func (c *SecretsManagerClient) PutSecretValue(ctx context.Context, request PutSecretValueRequest) (*PutSecretValueResult, error) {
+	if strings.TrimSpace(request.SecretID) == "" {
+		return nil, fmt.Errorf("secret ID is required")
+	}
+	for _, stage := range request.VersionStages {
+		if strings.TrimSpace(stage) == "" {
+			return nil, fmt.Errorf("version stages must not contain empty values")
+		}
+	}
+	input := &secretsmanager.PutSecretValueInput{SecretId: sdkaws.String(request.SecretID), VersionStages: append([]string(nil), request.VersionStages...)}
+	if err := setSecretValue(request.Value, &input.SecretString, &input.SecretBinary); err != nil {
+		return nil, err
+	}
+	token, err := newClientRequestToken()
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate put secret value request token: %w", err)
+	}
+	input.ClientRequestToken = sdkaws.String(token)
+	output, err := c.api.PutSecretValue(ctx, input)
+	if err != nil {
+		return nil, fmt.Errorf("failed to put secret value: %w", err)
+	}
+	if output == nil {
+		return nil, fmt.Errorf("failed to put secret value: Secrets Manager returned an empty response")
+	}
+	name, secretARN, versionID := sdkaws.ToString(output.Name), sdkaws.ToString(output.ARN), sdkaws.ToString(output.VersionId)
+	if name == "" || secretARN == "" || versionID == "" {
+		return nil, fmt.Errorf("failed to put secret value: Secrets Manager returned a result without a name, ARN, or version ID")
+	}
+	return &PutSecretValueResult{Identity: c.identity(secretARN), Name: name, ARN: secretARN, VersionID: versionID, VersionStages: append([]string(nil), output.VersionStages...)}, nil
+}
+
+// TagResource adds or replaces tags on a secret.
+func (c *SecretsManagerClient) TagResource(ctx context.Context, request TagSecretRequest) error {
+	if strings.TrimSpace(request.SecretID) == "" {
+		return fmt.Errorf("secret ID is required")
+	}
+	if len(request.Tags) == 0 {
+		return fmt.Errorf("at least one tag is required")
+	}
+	if err := validateTags(request.Tags); err != nil {
+		return err
+	}
+	output, err := c.api.TagResource(ctx, &secretsmanager.TagResourceInput{SecretId: sdkaws.String(request.SecretID), Tags: mapToTags(request.Tags)})
+	if err != nil {
+		return fmt.Errorf("failed to tag secret: %w", err)
+	}
+	if output == nil {
+		return fmt.Errorf("failed to tag secret: Secrets Manager returned an empty response")
+	}
+	return nil
+}
+
+// UntagResource removes tags by key from a secret.
+func (c *SecretsManagerClient) UntagResource(ctx context.Context, request UntagSecretRequest) error {
+	if strings.TrimSpace(request.SecretID) == "" {
+		return fmt.Errorf("secret ID is required")
+	}
+	if len(request.TagKeys) == 0 {
+		return fmt.Errorf("at least one tag key is required")
+	}
+	for _, key := range request.TagKeys {
+		if strings.TrimSpace(key) == "" {
+			return fmt.Errorf("tag keys must not contain empty values")
+		}
+	}
+	output, err := c.api.UntagResource(ctx, &secretsmanager.UntagResourceInput{SecretId: sdkaws.String(request.SecretID), TagKeys: append([]string(nil), request.TagKeys...)})
+	if err != nil {
+		return fmt.Errorf("failed to untag secret: %w", err)
+	}
+	if output == nil {
+		return fmt.Errorf("failed to untag secret: Secrets Manager returned an empty response")
+	}
+	return nil
+}
+
+// DeleteSecret schedules deletion with an explicit recovery window or performs
+// an explicitly requested permanent deletion.
+func (c *SecretsManagerClient) DeleteSecret(ctx context.Context, request DeleteSecretRequest) (*DeleteSecretResult, error) {
+	if strings.TrimSpace(request.SecretID) == "" {
+		return nil, fmt.Errorf("secret ID is required")
+	}
+	input := &secretsmanager.DeleteSecretInput{SecretId: sdkaws.String(request.SecretID)}
+	if request.Permanent {
+		if request.RecoveryWindowDays != 0 {
+			return nil, fmt.Errorf("recovery window cannot be set for permanent deletion")
+		}
+		input.ForceDeleteWithoutRecovery = sdkaws.Bool(true)
+	} else {
+		if request.RecoveryWindowDays < 7 || request.RecoveryWindowDays > 30 {
+			return nil, fmt.Errorf("recovery window must be between 7 and 30 days")
+		}
+		input.RecoveryWindowInDays = sdkaws.Int64(request.RecoveryWindowDays)
+	}
+	output, err := c.api.DeleteSecret(ctx, input)
+	if err != nil {
+		return nil, fmt.Errorf("failed to delete secret: %w", err)
+	}
+	if output == nil {
+		return nil, fmt.Errorf("failed to delete secret: Secrets Manager returned an empty response")
+	}
+	name, secretARN := sdkaws.ToString(output.Name), sdkaws.ToString(output.ARN)
+	if name == "" || secretARN == "" {
+		return nil, fmt.Errorf("failed to delete secret: Secrets Manager returned a result without a name or ARN")
+	}
+	if !request.Permanent && output.DeletionDate == nil {
+		return nil, fmt.Errorf("failed to delete secret: Secrets Manager returned a scheduled deletion without a deletion date")
+	}
+	return &DeleteSecretResult{Identity: c.identity(secretARN), Name: name, ARN: secretARN, DeletionDate: output.DeletionDate}, nil
+}
+
+// RestoreSecret cancels a scheduled deletion.
+func (c *SecretsManagerClient) RestoreSecret(ctx context.Context, request RestoreSecretRequest) (*RestoreSecretResult, error) {
+	if strings.TrimSpace(request.SecretID) == "" {
+		return nil, fmt.Errorf("secret ID is required")
+	}
+	output, err := c.api.RestoreSecret(ctx, &secretsmanager.RestoreSecretInput{SecretId: sdkaws.String(request.SecretID)})
+	if err != nil {
+		return nil, fmt.Errorf("failed to restore secret: %w", err)
+	}
+	if output == nil {
+		return nil, fmt.Errorf("failed to restore secret: Secrets Manager returned an empty response")
+	}
+	name, secretARN := sdkaws.ToString(output.Name), sdkaws.ToString(output.ARN)
+	if name == "" || secretARN == "" {
+		return nil, fmt.Errorf("failed to restore secret: Secrets Manager returned a result without a name or ARN")
+	}
+	return &RestoreSecretResult{Identity: c.identity(secretARN), Name: name, ARN: secretARN}, nil
 }
 
 // GetSecretValue retrieves AWSCURRENT by default, or a version selected by one
@@ -240,4 +436,80 @@ func cloneStages(source map[string][]string) map[string][]string {
 		result[versionID] = append([]string(nil), stages...)
 	}
 	return result
+}
+
+func tagsToMap(source []smtypes.Tag) map[string]string {
+	if len(source) == 0 {
+		return nil
+	}
+	result := make(map[string]string, len(source))
+	for _, tag := range source {
+		if tag.Key != nil {
+			result[*tag.Key] = sdkaws.ToString(tag.Value)
+		}
+	}
+	if len(result) == 0 {
+		return nil
+	}
+	return result
+}
+
+func mapToTags(source map[string]string) []smtypes.Tag {
+	if len(source) == 0 {
+		return nil
+	}
+	keys := make([]string, 0, len(source))
+	for key := range source {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	result := make([]smtypes.Tag, 0, len(keys))
+	for _, key := range keys {
+		result = append(result, smtypes.Tag{Key: sdkaws.String(key), Value: sdkaws.String(source[key])})
+	}
+	return result
+}
+
+func optionalString(value string) *string {
+	if value == "" {
+		return nil
+	}
+	return sdkaws.String(value)
+}
+
+func setSecretValue(value SecretValueInput, text **string, binary *[]byte) error {
+	switch value.Kind {
+	case ValueText:
+		if value.Binary != nil {
+			return fmt.Errorf("text secret value must not include binary data")
+		}
+		*text = sdkaws.String(value.Text)
+	case ValueBinary:
+		if value.Text != "" {
+			return fmt.Errorf("binary secret value must not include text data")
+		}
+		*binary = append([]byte{}, value.Binary...)
+	default:
+		return fmt.Errorf("secret value kind must be text or binary")
+	}
+	return nil
+}
+
+func validateTags(tags map[string]string) error {
+	for key := range tags {
+		if strings.TrimSpace(key) == "" {
+			return fmt.Errorf("tag keys must not be empty")
+		}
+	}
+	return nil
+}
+
+func newClientRequestToken() (string, error) {
+	var value [16]byte
+	if _, err := rand.Read(value[:]); err != nil {
+		return "", err
+	}
+	value[6] = (value[6] & 0x0f) | 0x40
+	value[8] = (value[8] & 0x3f) | 0x80
+	return fmt.Sprintf("%08x-%04x-%04x-%04x-%012x", value[0:4], value[4:6], value[6:8], value[8:10], value[10:16]), nil
 }

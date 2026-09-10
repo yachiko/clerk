@@ -73,8 +73,7 @@ type State struct {
 	SortAscending bool
 
 	// Type filter
-	FilterType    FilterType
-	BackendFilter aws.Backend
+	FilterType FilterType
 
 	// Describe view state
 	DescribeEntry            *cache.CacheEntry

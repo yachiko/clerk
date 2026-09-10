@@ -8,8 +8,8 @@ import (
 
 func TestFixtureSecretsAreUsefulAndDeterministic(t *testing.T) {
 	first, second := fixtureSecrets(), fixtureSecrets()
-	if len(first) != 4 || len(second) != len(first) {
-		t.Fatalf("fixture secret count = %d, want 4", len(first))
+	if len(first) != 5 || len(second) != len(first) {
+		t.Fatalf("fixture secret count = %d, want 5", len(first))
 	}
 	for i := range first {
 		if first[i].name != second[i].name || first[i].value != second[i].value || string(first[i].binary) != string(second[i].binary) {
@@ -19,7 +19,7 @@ func TestFixtureSecretsAreUsefulAndDeterministic(t *testing.T) {
 	if first[0].name != "/dev/database/password" || !first[0].versioned {
 		t.Fatalf("versioned duplicate fixture is not configured correctly: %#v", first[0])
 	}
-	if len(first[2].value) == 0 || first[3].binary == nil {
+	if len(first[2].value) == 0 || first[3].binary == nil || !first[4].plannedDeletion {
 		t.Fatal("text/JSON and binary fixture values must be populated")
 	}
 }

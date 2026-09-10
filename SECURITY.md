@@ -28,10 +28,10 @@ Do not open a public issue or PR for suspected vulnerabilities.
 
 ## Threat Model
 
-Clerk is a local CLI / TUI that reads and writes AWS Systems Manager Parameter Store entries using the credentials in your standard AWS SDK credential chain. The relevant threat surfaces are:
+Clerk is a local CLI / TUI that reads and writes AWS Systems Manager Parameter Store and Secrets Manager resources using the credentials in your standard AWS SDK credential chain. The relevant threat surfaces are:
 
 - **AWS credentials.** Clerk inherits whatever the SDK resolves (`~/.aws/credentials`, IMDS, env vars). It never persists credentials and never logs them.
-- **Local cache.** The browse cache lives under `~/.clerk/cache.json` and respects `cache_ttl`. Secret values are stored in memory only; the cache holds parameter names and metadata, not plaintext values.
+- **Local cache.** Backend-specific browse caches live under `~/.clerk/cache/v2/<partition>/<account-id>/<region>/<backend>.json` and respect `cache_ttl`. They hold names and metadata only, never secret values.
 - **Clipboard.** When a value is copied, the clipboard is cleared after `clipboard_timeout` (default 60s).
 - **Config file.** `~/.clerk/config.json` stores user preferences (region, profile, defaults). It never stores secrets.
 
@@ -40,7 +40,7 @@ Clerk does not open network listeners and does not perform authentication on its
 ## Out of Scope
 
 - Compromise of the host machine.
-- Misconfigured IAM policies that grant overly broad SSM access.
+- Misconfigured IAM policies that grant overly broad SSM or Secrets Manager access.
 - Bugs in the AWS SDK or upstream dependencies after Dependabot has had a chance to update them.
 - Side-channel observation of values briefly held in the terminal scrollback.
 

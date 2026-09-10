@@ -21,7 +21,7 @@ BINARY_PATH := bin/$(BINARY_NAME)
 # Platforms for cross-compilation
 PLATFORMS := linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64
 
-.PHONY: all build dev clean test coverage lint fmt fmt-check vet deps install uninstall tag test-unit test-integration test-all moto-start moto-stop help
+.PHONY: all build dev clean test coverage lint fmt fmt-check vet deps install uninstall tag test-unit test-integration test-all moto-start moto-stop fixtures help
 
 ## Default target
 all: deps lint test build
@@ -130,6 +130,10 @@ moto-stop:
 	@echo "Stopping moto server..."
 	docker-compose -f docker-compose.test.yml down
 
+## Populate a running moto server with manual SSM and Secrets Manager fixtures
+fixtures:
+	MOTO_ENDPOINT=http://localhost:5000 $(GOCMD) run ./cmd/fixtures -endpoint http://localhost:5000
+
 ## Run integration tests
 test-integration: build moto-start
 	@echo "Running integration tests..."
@@ -184,5 +188,6 @@ help:
 	@echo "  tag                 - Create and push next patch version tag"
 	@echo "  moto-start          - Start moto server for integration tests"
 	@echo "  moto-stop           - Stop moto server"
+	@echo "  fixtures            - Populate Moto with manual SSM and Secrets Manager fixtures"
 	@echo "  clean               - Remove build artifacts"
 	@echo "  help                - Show this help message"

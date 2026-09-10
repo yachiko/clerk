@@ -2,9 +2,7 @@ package cli
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
-	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -14,49 +12,51 @@ import (
 	"github.com/yachiko/clerk/internal/cache"
 )
 
-func TestBackendFlagDefaultsToAll(t *testing.T) {
+func TestBackendFlagDefaultsToSSM(t *testing.T) {
 	t.Cleanup(func() { globalOpts = GlobalOptions{} })
 	globalOpts = GlobalOptions{}
 	root := NewRootCommand("test", "", "")
 	flag := root.PersistentFlags().Lookup("backend")
-	if flag == nil || flag.DefValue != "all" || globalOpts.Backend != "all" {
+	if flag == nil || flag.DefValue != "ssm" || globalOpts.Backend != "ssm" {
 		t.Fatalf("backend flag = %#v, value %q", flag, globalOpts.Backend)
 	}
 }
 
-func TestRefreshKeepsSSMCompatibilityDefault(t *testing.T) {
+func TestBackendAwareCommandsDefaultToSSM(t *testing.T) {
 	t.Cleanup(func() { globalOpts = GlobalOptions{} })
 	globalOpts = GlobalOptions{}
 	root := NewRootCommand("test", "", "")
-	var refreshCmd *cobra.Command
-	for _, command := range root.Commands() {
-		if command.Name() == "refresh" {
-			refreshCmd = command
-			break
+	for _, name := range []string{"browse", "cp", "delete", "get", "list", "mv", "put", "refresh", "tag", "untag"} {
+		var command *cobra.Command
+		for _, candidate := range root.Commands() {
+			if candidate.Name() == name {
+				command = candidate
+				break
+			}
 		}
-	}
-	if refreshCmd == nil {
-		t.Fatal("refresh command not found")
-	}
-	backend, err := refreshBackend(refreshCmd)
-	if err != nil || backend != aws.BackendSSM {
-		t.Fatalf("refresh backend = %q, err=%v", backend, err)
+		if command == nil {
+			t.Fatalf("%s command not found", name)
+		}
+		backend, err := selectedBackend(command)
+		if err != nil || backend != aws.BackendSSM {
+			t.Fatalf("%s backend = %q, err=%v", name, backend, err)
+		}
 	}
 }
 
-func TestDirectAndMutationBackendValidationRunsBeforeAWS(t *testing.T) {
+func TestBackendSelectionValidationRunsBeforeAWS(t *testing.T) {
 	t.Cleanup(func() { globalOpts = GlobalOptions{} })
 	tests := []struct {
 		args []string
 		want string
 	}{
-		{[]string{"get", "/x"}, "get requires an explicit --backend"},
-		{[]string{"get", "/x", "--backend", "all"}, "get requires one concrete backend"},
-		{[]string{"put", "/x", "value"}, "put requires explicit --backend ssm"},
-		{[]string{"delete", "/x", "--force", "--backend", "secretsmanager"}, "delete is supported only with --backend ssm"},
-		{[]string{"cp", "/x", "/y", "--backend", "all"}, "cp is supported only with --backend ssm"},
-		{[]string{"mv", "/x", "/y", "--force", "--backend", "secretsmanager"}, "mv is supported only with --backend ssm"},
-		{[]string{"refresh", "--backend", "all"}, "refresh requires one concrete backend"},
+		{[]string{"get", "/x", "--backend", "all"}, `invalid backend "all"`},
+		{[]string{"delete", "/x", "--force", "--backend", "secretsmanager"}, "requires --recovery-window"},
+		{[]string{"cp", "/x", "/y", "--backend", "secretsmanager"}, "cp does not support --backend secretsmanager"},
+		{[]string{"mv", "/x", "/y", "--force", "--backend", "secretsmanager"}, "mv does not support --backend secretsmanager"},
+		{[]string{"put", "/x", "value", "--backend", "secretsmanager", "--type", "SecureString"}, "--type is supported only"},
+		{[]string{"restore", "/x"}, "restore is supported only"},
+		{[]string{"refresh", "--backend", "all"}, `invalid backend "all"`},
 	}
 	for _, test := range tests {
 		globalOpts = GlobalOptions{}
@@ -65,6 +65,21 @@ func TestDirectAndMutationBackendValidationRunsBeforeAWS(t *testing.T) {
 		err := root.Execute()
 		if err == nil || !strings.Contains(err.Error(), test.want) {
 			t.Errorf("%v: error %q, want substring %q", test.args, err, test.want)
+		}
+	}
+}
+
+func TestSSMOnlyCommandsAcceptDefaultBackend(t *testing.T) {
+	t.Cleanup(func() { globalOpts = GlobalOptions{} })
+	globalOpts = GlobalOptions{}
+	root := NewRootCommand("test", "", "")
+	for _, name := range []string{"cp", "delete", "mv", "put"} {
+		for _, command := range root.Commands() {
+			if command.Name() == name {
+				if err := command.PreRunE(command, nil); err != nil {
+					t.Errorf("%s rejected default backend: %v", name, err)
+				}
+			}
 		}
 	}
 }
@@ -90,55 +105,30 @@ func TestGetSelectorValidation(t *testing.T) {
 	}
 }
 
-func TestAggregateMetadataKeepsEqualNamesAndPartialScope(t *testing.T) {
-	now := time.Now()
-	providers := []metadataProvider{
-		{scope: discoveryScope{Backend: aws.BackendSSM}, list: func(context.Context, string, bool) ([]cache.CacheEntry, error) {
-			return []cache.CacheEntry{{Identity: aws.ResourceIdentity{Backend: aws.BackendSSM}, Name: "shared", LastModifiedDate: now}}, nil
-		}},
-		{scope: discoveryScope{Backend: aws.BackendSecretsManager}, list: func(context.Context, string, bool) ([]cache.CacheEntry, error) {
-			return nil, errors.New("access denied")
-		}},
-	}
-	items, scopes, err := aggregateMetadata(context.Background(), providers, "*", false)
-	if err == nil || len(items) != 1 || len(scopes) != 2 || scopes[0].Status != "succeeded" || scopes[1].Status != "failed" || discoveryCompleteness(scopes) != "partial" {
-		t.Fatalf("items=%#v scopes=%#v err=%v", items, scopes, err)
-	}
-
-	providers[1].list = func(context.Context, string, bool) ([]cache.CacheEntry, error) {
-		return []cache.CacheEntry{{Identity: aws.ResourceIdentity{Backend: aws.BackendSecretsManager}, Name: "shared", LastModifiedDate: now}}, nil
-	}
-	items, scopes, err = aggregateMetadata(context.Background(), providers, "*", false)
-	if err != nil || len(items) != 2 || items[0].Identity.Backend == items[1].Identity.Backend || discoveryCompleteness(scopes) != "complete" {
-		t.Fatalf("equal names were conflated: items=%#v scopes=%#v err=%v", items, scopes, err)
-	}
-}
-
 func TestListOutputContracts(t *testing.T) {
 	t.Cleanup(func() { globalOpts = GlobalOptions{} })
 	entry := cache.CacheEntry{Identity: aws.ResourceIdentity{Backend: aws.BackendSecretsManager}, Name: "same", Type: "Secret", LastModifiedDate: time.Date(2026, 1, 2, 3, 4, 0, 0, time.UTC)}
-	scope := discoveryScope{Backend: aws.BackendSecretsManager, Status: "succeeded", Complete: true}
 	globalOpts.Output = "plain"
 	var stdout, stderr bytes.Buffer
-	if err := outputListTo(&stdout, &stderr, []cache.CacheEntry{entry}, []discoveryScope{scope}, aws.BackendSecretsManager, false); err != nil {
+	if err := outputListTo(&stdout, &stderr, []cache.CacheEntry{entry}, aws.BackendSecretsManager, false); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.HasPrefix(stdout.String(), "BACKEND  NAME  TYPE  VERSION  MODIFIED\n") || !strings.Contains(stdout.String(), "secretsmanager  same") {
-		t.Fatalf("plain output lacks textual backend column:\n%s", stdout.String())
+	if !strings.HasPrefix(stdout.String(), "NAME  TYPE  VERSION  MODIFIED\n") || strings.Contains(stdout.String(), "BACKEND") {
+		t.Fatalf("plain output is not single-provider output:\n%s", stdout.String())
 	}
 
 	globalOpts.Output = "json"
 	stdout.Reset()
-	if err := outputListTo(&stdout, &stderr, []cache.CacheEntry{entry}, []discoveryScope{scope}, aws.BackendSecretsManager, false); err != nil {
+	if err := outputListTo(&stdout, &stderr, []cache.CacheEntry{entry}, aws.BackendSecretsManager, false); err != nil {
 		t.Fatal(err)
 	}
-	var envelope discoveryEnvelope
-	if err := json.Unmarshal(stdout.Bytes(), &envelope); err != nil || envelope.SchemaVersion != 1 || envelope.Completeness != "complete" || len(envelope.Items) != 1 || len(envelope.Scopes) != 1 {
-		t.Fatalf("invalid envelope: %#v, %v", envelope, err)
+	var items []cache.CacheEntry
+	if err := json.Unmarshal(stdout.Bytes(), &items); err != nil || len(items) != 1 || strings.Contains(stdout.String(), `"scopes"`) {
+		t.Fatalf("invalid single-provider array: %#v, %v", items, err)
 	}
 
 	stdout.Reset()
-	if err := outputListTo(&stdout, &stderr, []cache.CacheEntry{entry}, []discoveryScope{scope}, aws.BackendSSM, false); err != nil {
+	if err := outputListTo(&stdout, &stderr, []cache.CacheEntry{entry}, aws.BackendSSM, false); err != nil {
 		t.Fatal(err)
 	}
 	if strings.Contains(stdout.String(), `"items"`) || !strings.HasPrefix(strings.TrimSpace(stdout.String()), "[") {

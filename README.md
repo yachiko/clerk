@@ -3,7 +3,7 @@
 </p>
 
 <h1 align="center">Clerk</h1>
-<p align="center"><strong>Discover AWS Parameter Store and Secrets Manager values, with safe Parameter Store management</strong></p>
+<p align="center"><strong>Discover and manage AWS Parameter Store and Secrets Manager values</strong></p>
 
 <p align="center">
   <a href="https://github.com/yachiko/clerk/actions/workflows/ci.yml"><img src="https://github.com/yachiko/clerk/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
@@ -16,12 +16,14 @@
 
 ## Features
 
-- **Put**: Create or update secrets with tags and encryption
+- **Put**: Create or update Parameter Store parameters and Secrets Manager text or binary secrets
 - **Get**: Retrieve SSM parameters or Secrets Manager text/binary values with version support
 - **Delete**: Remove secrets with confirmation
-- **List**: Aggregate metadata from both backends with glob filtering and partial-result reporting
-- **Copy/Move**: Duplicate or relocate secrets
-- **Browse**: Interactive k9s-style terminal UI for exploring and managing secrets
+- **List**: List metadata from one selected backend with glob filtering
+- **Copy/Move**: Duplicate or relocate Parameter Store parameters
+- **Lifecycle**: Schedule, permanently delete, or restore Secrets Manager secrets
+- **Tags**: Add, replace, or remove tags in either backend
+- **Browse**: Provider-specific terminal UIs for exploring and managing resources
 - **Cache**: Local caching for fast browsing and searching
 - **Config**: Configuration management for profiles and preferences
 
@@ -74,7 +76,7 @@ clerk put "/dev/db_password" --stdin --tags "env=dev,team=backend" --backend ssm
 # Get a secret
 clerk get "/dev/db_password" --backend ssm
 
-# List secrets
+# List Parameter Store parameters (the default backend)
 clerk list "/dev/*"
 
 # Browse interactively
@@ -85,20 +87,23 @@ clerk browse
 
 ### Data Commands
 
-| Command  | Description                 | Usage                                      |
-| -------- | --------------------------- | ------------------------------------------ |
-| `put`    | Create or update a secret   | `clerk put <name> [value] [--file path\|--stdin]` |
-| `get`    | Retrieve a secret value     | `clerk get <name[@version]> [flags]`     |
-| `delete` | Delete a secret             | `clerk delete <name> [flags]`             |
-| `list`   | List secrets with filtering | `clerk list [path] [flags]`               |
-| `cp`     | Copy a secret to a new path | `clerk cp <src> <dst> [flags]`            |
-| `mv`     | Move/rename a secret        | `clerk mv <src> <dst> [flags]`            |
-| `browse` | Interactive terminal UI     | `clerk browse [flags]`                    |
-| `refresh`| Refresh the local cache     | `clerk refresh [flags]`                   |
+| Command | Description | Usage |
+| ------- | ----------- | ----- |
+| `put` | Create or update a resource | `clerk put <name> [value] [flags]` |
+| `get` | Retrieve a value | `clerk get <name[@version]> [flags]` |
+| `delete` | Delete a resource | `clerk delete <name> [flags]` |
+| `restore` | Restore a scheduled SM secret | `clerk restore <name-or-arn> --backend secretsmanager` |
+| `tag` | Add or replace tags | `clerk tag <name-or-arn> <key=value...>` |
+| `untag` | Remove tags | `clerk untag <name-or-arn> <key...>` |
+| `list` | List backend metadata | `clerk list [pattern] [flags]` |
+| `cp` | Copy an SSM parameter | `clerk cp <src> <dst> [flags]` |
+| `mv` | Move an SSM parameter | `clerk mv <src> <dst> [flags]` |
+| `browse` | Interactive provider UI | `clerk browse [flags]` |
+| `refresh` | Refresh the selected cache | `clerk refresh [flags]` |
 
-`--backend` accepts `all`, `ssm`, or `secretsmanager`. `list` and `browse`
-default to `all`. Direct reads require one explicit backend, and current write,
-delete, copy, move, tag, and label operations require `--backend ssm`.
+`--backend` accepts `ssm` (the default) or `secretsmanager`; `all` is not
+supported. Every command operates on its selected backend. `cp` and `mv` are
+SSM-only. `restore` is Secrets Manager-only.
 
 ### Management Commands
 
@@ -131,9 +136,10 @@ Configuration is stored in `~/.clerk/config.json`.
 | `browse_refresh_cooldown` | `5m`           | Minimum age for startup refresh                       |
 | `search_slash_prefix` | `true`             | Start interactive search with `/`                     |
 
-Cache files live under `~/.clerk/cache/<account-id>/<region>.json` — separate
-files per AWS account and region, so switching profiles doesn't invalidate
-unrelated caches. The location isn't user-configurable.
+Cache files live under
+`~/.clerk/cache/v2/<partition>/<account-id>/<region>/<backend>.json`. The v2
+path isolates SSM and Secrets Manager caches as well as AWS partition, account,
+and region. Values are never cached. The location isn't user-configurable.
 
 Region and profile precedence is command flag, explicitly configured Clerk value,
 then the AWS SDK environment/shared configuration. An unset region produces an
@@ -168,30 +174,45 @@ The browse mode provides an interactive terminal UI similar to k9s for Kubernete
 Detail browsing starts masked by default. Reveal or copy explicitly retrieves a
 value; older versions are loaded on demand. Closing detail drops retained value
 references without promising physical memory erasure. Editors return through the
-terminal UI lifecycle, preserve bytes, skip unchanged saves, and reject detected
-concurrent updates.
+terminal UI lifecycle and preserve bytes. SSM edits skip unchanged saves and
+reject detected concurrent updates; Secrets Manager edits create a new version.
 
 Startup requires online AWS identity resolution. Cached fallback after a refresh
 failure is visibly stale; offline startup without verified account identity is
 unsupported. Automatic refresh is a startup freshness check, not a periodic monitor.
 
-### Keyboard Shortcuts
+Run `clerk browse` for Parameter Store or `clerk browse --backend
+secretsmanager` for the separate Secrets Manager UI. Both show metadata first;
+values are fetched only when revealed, copied, or edited.
 
-| Key            | Action                               |
-| -------------- | ------------------------------------ |
-| `↑/↓` or `j/k` | Navigate up/down                     |
-| `PgUp/PgDn`    | Move page up/down                    |
-| `Home/End`     | Jump to first/last                   |
-| `d` or `Enter` | Describe secret (show details)       |
-| `c`            | Copy value to clipboard              |
-| `e`            | Edit in $EDITOR                      |
-| `Delete`       | Delete (with confirmation)           |
-| `/`            | Search/filter                        |
-| `t`            | Toggle tree/flat view                |
-| `Space`        | Expand/collapse (tree view)          |
-| `x`            | Toggle value masking (describe view) |
-| `Esc`          | Back/cancel                          |
-| `q`            | Quit                                 |
+### Shared Shortcuts
+
+| Key | Action |
+| --- | ------ |
+| `↑/↓`, `j/k`, `PgUp/PgDn`, `Home/End` | Navigate |
+| `d` or `Enter` | Open details |
+| `c` / `C` | Copy value / copy name |
+| `e` | Edit value or create a new version |
+| `Delete` | Delete (with confirmation) |
+| `/` | Search/filter |
+| `r` | Refresh |
+| `Esc` / `q` | Back, cancel, or quit |
+
+### Parameter Store Shortcuts
+
+`t` toggles tree and flat views; `Space` expands a tree node; `s`/`S` change
+sorting; `f` filters parameter type; `p` copies and `m` moves a parameter. In
+details, `Tab`/`Shift+Tab` select versions, `g` selects the latest, `x` reveals,
+`w` toggles wrapping, `a`/`r`/`m` manage version labels, and `T`/`D` add/remove
+tags.
+
+### Secrets Manager Shortcuts
+
+`n` creates a secret; `T`/`D` add/remove tags; `u` restores a secret scheduled
+for deletion. In details, `Tab`/`Shift+Tab` (or `j`/`k`) select versions, `g`
+selects `AWSCURRENT`, and `x` reveals the selected value. Delete prompts for a
+7-30 day recovery window or permanent deletion. Rotation information can be
+viewed when AWS returns it; Clerk does not manage rotation.
 
 ## Examples
 
@@ -212,6 +233,12 @@ clerk put "/app/allowed_hosts" "host1.com,host2.com,host3.com" --type StringList
 
 # Create with specific KMS key
 clerk put "/secure/secret" "value" --kms-key-id alias/my-key --backend ssm
+
+# Create a Secrets Manager text secret from a file
+clerk put "app/certificate" file://./certs/cert.pem --backend secretsmanager
+
+# Create a Secrets Manager binary secret from a file
+clerk put "app/certificate" fileb://./certs/cert.p12 --backend secretsmanager
 ```
 
 Positional values are always literal, including text equal to an existing filename.
@@ -219,6 +246,12 @@ Use `--file` to read a file or `--stdin` to read standard input; these modes pre
 leading/trailing whitespace and newlines exactly. Missing files fail. This replaces
 the old implicit filename detection and trimming behavior. For sensitive values,
 prefer file/stdin input to keep them out of shell history and process arguments.
+
+For Secrets Manager, a positional `file://PATH` creates or updates an exact text
+value and `fileb://PATH` creates or updates raw binary bytes. `--file PATH` and
+`--stdin` also provide exact text values. Creation accepts `--description`,
+`--kms-key-id`, and `--tags`; updating an existing Secrets Manager secret writes
+a new `AWSCURRENT` version and does not accept those creation-only options.
 
 ### Retrieve Secrets
 
@@ -305,6 +338,33 @@ the partial result. Inspect both resources before retrying. A source-delete time
 may have completed remotely. The source version check reduces concurrent-update
 risk but SSM read/check/delete and editor read/check/write are not atomic.
 
+### Tags and Secrets Manager Lifecycle
+
+```bash
+# Add or replace tags in either backend
+clerk tag "/app/api_key" env=prod owner=platform
+clerk tag "app/api_key" --tags "env=prod,owner=platform" --backend secretsmanager
+
+# Remove tags
+clerk untag "/app/api_key" owner
+clerk untag "app/api_key" --keys owner,temporary --backend secretsmanager
+
+# Schedule Secrets Manager deletion with an explicit recovery period
+clerk delete "app/api_key" --backend secretsmanager --recovery-window 14 --force
+
+# Permanently delete a Secrets Manager secret
+clerk delete "app/api_key" --backend secretsmanager --force-delete-without-recovery --force
+
+# Cancel a scheduled deletion
+clerk restore "app/api_key" --backend secretsmanager
+```
+
+`tag` accepts positional `key=value` pairs or `--tags`; `untag` accepts
+positional keys or `--keys`. For Secrets Manager, noninteractive deletion
+requires `--recovery-window` (7-30) or `--force-delete-without-recovery`.
+`--force` skips confirmation only. Scheduled deletion can be restored; permanent
+deletion and SSM deletion cannot.
+
 ## Shell Completion
 
 Enable auto-completion in your shell:
@@ -370,7 +430,7 @@ Tag lookup is needed for enriched inventory and transfers. Plain metadata listin
 does not require it. `DescribeParameters` exposes metadata across the selected
 account and region; a parameter prefix in Clerk is a filter, not an IAM boundary.
 
-Secrets Manager metadata and value reader:
+Secrets Manager inventory and value reader:
 
 ```json
 {
@@ -392,7 +452,36 @@ Secrets Manager metadata and value reader:
 
 Secrets encrypted with a customer-managed key also require `kms:Decrypt` as
 permitted by the key policy. `list` and initial TUI browsing use metadata APIs;
-values are requested only by `get`, reveal, or copy.
+values are requested only by `get`, reveal, copy, or text editing.
+
+Secrets Manager writer (add the inventory/reader permissions above when the
+workflow needs existence checks, cache reconciliation, or value editing):
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": [
+        "secretsmanager:CreateSecret",
+        "secretsmanager:PutSecretValue",
+        "secretsmanager:TagResource",
+        "secretsmanager:UntagResource",
+        "secretsmanager:DeleteSecret",
+        "secretsmanager:RestoreSecret",
+        "secretsmanager:DescribeSecret"
+      ],
+      "Resource": "arn:aws:secretsmanager:eu-west-1:123456789012:secret:app/*"
+    }
+  ]
+}
+```
+
+For customer-managed Secrets Manager keys, grant the KMS permissions AWS
+requires for the chosen key through both IAM and the key policy. Scope the key
+and secret ARNs to the intended resources. Clerk displays rotation metadata but
+does not create, configure, or rotate secrets.
 
 Value reader (including explicit history access):
 

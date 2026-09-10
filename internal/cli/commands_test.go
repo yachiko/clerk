@@ -1,10 +1,17 @@
 package cli
 
 import (
+	"bytes"
+	"encoding/json"
+	"io"
+	"time"
+
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	"os"
 	"path/filepath"
+
+	"github.com/yachiko/clerk/internal/aws"
 )
 
 var _ = Describe("value input modes", func() {
@@ -28,6 +35,75 @@ var _ = Describe("value input modes", func() {
 	It("rejects a missing explicit file", func() {
 		_, err := resolveValue("ignored", filepath.Join(GinkgoT().TempDir(), "missing"), false, os.Stdin)
 		Expect(err).To(HaveOccurred())
+	})
+
+	It("resolves Secrets Manager text and binary URI values exactly", func() {
+		path := filepath.Join(GinkgoT().TempDir(), "value")
+		want := []byte{' ', 0, 0xff, '\n'}
+		Expect(os.WriteFile(path, want, 0600)).To(Succeed())
+
+		text, err := resolveSecretValue("file://"+path, "", false, bytes.NewReader(nil))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(text.Kind).To(Equal(aws.ValueText))
+		Expect([]byte(text.Text)).To(Equal(want))
+
+		binary, err := resolveSecretValue("fileb://"+path, "", false, bytes.NewReader(nil))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(binary.Kind).To(Equal(aws.ValueBinary))
+		Expect(binary.Binary).To(Equal(want))
+	})
+
+	It("keeps bare Secrets Manager values literal", func() {
+		value, err := resolveSecretValue("relative/path", "", false, bytes.NewReader(nil))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(value).To(Equal(aws.SecretValueInput{Kind: aws.ValueText, Text: "relative/path"}))
+	})
+
+	It("reads stdin as an exact Secrets Manager string", func() {
+		value, err := resolveSecretValue("", "", true, bytes.NewBufferString(" exact\n"))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(value.Text).To(Equal(" exact\n"))
+	})
+})
+
+var _ = Describe("mutation parsers and output", func() {
+	It("parses positional and flag tag forms", func() {
+		tags, err := tagArguments([]string{"env=prod", "team=api"}, "")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(tags).To(Equal(map[string]string{"env": "prod", "team": "api"}))
+		_, err = tagArguments([]string{"env=prod"}, "team=api")
+		Expect(err).To(MatchError(ContainSubstring("cannot be combined")))
+	})
+
+	It("normalizes tag keys and rejects empty keys", func() {
+		keys, err := untagArguments(nil, " env, team ")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(keys).To(Equal([]string{"env", "team"}))
+		_, err = untagArguments(nil, "env,")
+		Expect(err).To(MatchError(ContainSubstring("cannot be empty")))
+	})
+
+	It("emits structured scheduled deletion output", func() {
+		deletionDate := time.Date(2026, 9, 20, 1, 2, 3, 0, time.UTC)
+		globalOpts.Output = "json"
+		DeferCleanup(func() { globalOpts = GlobalOptions{} })
+		var out bytes.Buffer
+		Expect(outputSecretDeleteResult(&out, &aws.DeleteSecretResult{Name: "db", DeletionDate: &deletionDate}, false)).To(Succeed())
+		var value map[string]any
+		Expect(json.Unmarshal(out.Bytes(), &value)).To(Succeed())
+		Expect(value).To(HaveKeyWithValue("permanent", false))
+		Expect(value).To(HaveKey("deletion_date"))
+	})
+
+	It("emits no values in mutation JSON", func() {
+		globalOpts.Output = "json"
+		DeferCleanup(func() { globalOpts = GlobalOptions{} })
+		var out bytes.Buffer
+		Expect(outputSecretPutResult(&out, "db", "opaque", true, map[string]string{"env": "prod"})).To(Succeed())
+		data, err := io.ReadAll(&out)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(string(data)).NotTo(ContainSubstring("secret_value"))
+		Expect(string(data)).NotTo(ContainSubstring(`"value"`))
 	})
 })
 
