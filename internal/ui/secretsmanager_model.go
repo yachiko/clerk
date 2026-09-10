@@ -900,7 +900,7 @@ func (m SecretsManagerModel) renderSMList() string {
 func (m SecretsManagerModel) renderSMDetail() string {
 	meta := m.metadata[m.detailIdentity]
 	lines := []string{m.smTitle("DETAIL"), ""}
-	nameWidth := max(20, m.width-47)
+	nameWidth := max(12, m.width-35)
 	modified := ""
 	if meta.LastChangedDate != nil {
 		modified = meta.LastChangedDate.Format("2006-01-02 15:04")
@@ -909,107 +909,194 @@ func (m SecretsManagerModel) renderSMDetail() string {
 	if meta.RotationEnabled != nil && *meta.RotationEnabled {
 		rotation = "on"
 	}
-	lines = append(lines, "  "+nameColStyle.Render(fmt.Sprintf("%-*s", nameWidth, truncateString(m.detailName(), nameWidth)))+"   "+typeColStyle.Render(fmt.Sprintf("%-8s", rotation))+"   "+tagColStyle.Render(fmt.Sprintf("%4d", len(meta.Tags)))+"   "+modifiedColStyle.Render(fmt.Sprintf("%16s  ", modified)))
+	info := "  " + nameColStyle.Render(fmt.Sprintf("%-*s", nameWidth, truncateString(m.detailName(), nameWidth)))
+	if m.width >= 50 {
+		info += "   " + typeColStyle.Render(fmt.Sprintf("%-8s", rotation)) + "   " + tagColStyle.Render(fmt.Sprintf("%4d", len(meta.Tags)))
+	}
+	if m.width >= 75 {
+		info += "   " + modifiedColStyle.Render(fmt.Sprintf("%16s", modified))
+	}
+	lines = append(lines, info)
 	lines = append(lines, "  "+separatorStyle.Render(strings.Repeat("─", max(0, m.width-4))))
-	lines = append(lines, panelHeaderStyle.Render("  METADATA"))
-	lines = append(lines, dimStyle.Render("  ARN: "+meta.ARN))
+
+	availableWidth := max(2, m.width-4)
+	leftWidth := max(12, min(44, availableWidth*2/5))
+	rightWidth := max(1, availableWidth-leftWidth-2)
+	if rightWidth < 16 && availableWidth >= 32 {
+		leftWidth, rightWidth = availableWidth-18, 16
+	}
+	panelHeight := max(5, m.height-7)
+	left := m.renderSMVersionsPanel(meta, leftWidth, panelHeight)
+	right := m.renderSMValuePanel(rightWidth, panelHeight)
+	lines = append(lines, lipgloss.JoinHorizontal(lipgloss.Top, left, right))
+	linesUsed := 0
+	for _, line := range lines {
+		linesUsed += strings.Count(line, "\n") + 1
+	}
+	for linesUsed < m.height-3 {
+		lines = append(lines, "")
+		linesUsed++
+	}
+	lines = append(lines, "  "+separatorStyle.Render(strings.Repeat("─", max(0, m.width-4))))
+	lines = append(lines, m.smStatus(), "  "+m.smDetailHelp()+"  ")
+	return strings.Join(lines, "\n")
+}
+
+func (m SecretsManagerModel) smDetailHelp() string {
+	if m.width < 70 {
+		return renderHelp("tab", "version", "x", "reveal", "esc", "back")
+	}
+	if m.width < 120 {
+		return renderHelp("tab/shift+tab", "version", "g", "AWSCURRENT", "x", "reveal", "c", "copy", "e", "new-version", "esc/q", "back")
+	}
+	return renderHelp("tab/shift+tab", "version", "g", "AWSCURRENT", "x", "reveal", "c", "copy-value", "C", "copy-name", "e", "new-version", "T/D", "tags", "Delete", "lifecycle", "u", "restore", "r", "refresh", "esc/q", "back")
+}
+
+func (m SecretsManagerModel) renderSMVersionsPanel(meta aws.SecretMetadata, width, height int) string {
+	contentWidth := max(1, width-4)
+	metadata := m.smMetadataLines(meta, contentWidth)
+	metadata = metadata[:min(len(metadata), max(0, height-3))]
+	lines := []string{panelHeaderStyle.Render(truncateString("  VERSION HISTORY", width))}
+	lines = append(lines, metadata...)
+	lines = append(lines, dimStyle.Render("  "+truncateString("Versions:", contentWidth)))
+	remaining := max(1, height-len(lines)-1)
+	if len(m.versions) == 0 {
+		lines = append(lines, dimStyle.Render("  "+truncateString("No version metadata available", contentWidth)))
+	} else {
+		for i, version := range m.versions {
+			if remaining == 0 {
+				break
+			}
+			date := ""
+			if version.CreatedDate != nil {
+				date = version.CreatedDate.Format("2006-01-02 15:04")
+			}
+			line := "  " + truncateString(fmt.Sprintf("%s [%s] %s", version.VersionID, strings.Join(version.VersionStages, ","), date), contentWidth)
+			if i == m.versionIndex {
+				line = selectedStyle.Render(line)
+			}
+			lines = append(lines, line)
+			remaining--
+		}
+	}
+	for len(lines) < height {
+		lines = append(lines, "")
+	}
+	return lipgloss.NewStyle().MarginLeft(2).Width(width).Height(height).Render(strings.Join(lines[:height], "\n"))
+}
+
+func (m SecretsManagerModel) smMetadataLines(meta aws.SecretMetadata, width int) []string {
+	line := func(label, value string) string {
+		return dimStyle.Render("  " + truncateString(label+util.SanitizeTerminal(value), width))
+	}
+	lines := []string{line("ARN: ", meta.ARN)}
 	if meta.Description != "" {
-		lines = append(lines, "  Description: "+util.SanitizeTerminal(meta.Description))
+		lines = append(lines, line("Description: ", meta.Description))
 	}
 	if meta.KMSKeyID != "" {
-		lines = append(lines, "  KMS key: "+meta.KMSKeyID)
+		lines = append(lines, line("KMS: ", meta.KMSKeyID))
 	}
-	if meta.CreatedDate != nil {
-		lines = append(lines, "  Created: "+meta.CreatedDate.Format(time.RFC3339))
-	}
-	if meta.LastAccessedDate != nil {
-		lines = append(lines, "  Last accessed: "+meta.LastAccessedDate.Format("2006-01-02"))
-	}
-	if meta.RotationEnabled != nil {
-		rotation := "disabled"
-		if *meta.RotationEnabled {
-			rotation = "enabled"
-		}
-		lines = append(lines, "  Rotation: "+rotation)
+	rotation := "Rotation: disabled"
+	if meta.RotationEnabled != nil && *meta.RotationEnabled {
+		rotation = "Rotation: enabled"
 	}
 	if meta.RotationRules != nil {
 		if meta.RotationRules.ScheduleExpression != "" {
-			lines = append(lines, "  Rotation schedule: "+meta.RotationRules.ScheduleExpression)
+			rotation += " " + meta.RotationRules.ScheduleExpression
 		} else if meta.RotationRules.AutomaticallyAfterDays != nil {
-			lines = append(lines, fmt.Sprintf("  Rotation interval: %d days", *meta.RotationRules.AutomaticallyAfterDays))
+			rotation += fmt.Sprintf(" %d days", *meta.RotationRules.AutomaticallyAfterDays)
 		}
 	}
+	lines = append(lines, line("", rotation))
+	lifecycle := "Lifecycle: active"
+	if meta.DeletedDate != nil {
+		lifecycle = "Lifecycle: deletion " + meta.DeletedDate.Format("2006-01-02 15:04")
+	}
+	lines = append(lines, line("", lifecycle))
+	pairs := make([]string, 0, len(meta.Tags))
+	for key, value := range meta.Tags {
+		pairs = append(pairs, key+"="+value)
+	}
+	sort.Strings(pairs)
+	tags := "(none)"
+	if len(pairs) > 0 {
+		tags = strings.Join(pairs, ", ")
+	}
+	lines = append(lines, line("Tags: ", tags))
+	activity := make([]string, 0, 3)
+	if meta.CreatedDate != nil {
+		activity = append(activity, "created "+meta.CreatedDate.Format("2006-01-02"))
+	}
+	if meta.LastChangedDate != nil {
+		activity = append(activity, "changed "+meta.LastChangedDate.Format("2006-01-02"))
+	}
+	if meta.LastAccessedDate != nil {
+		activity = append(activity, "accessed "+meta.LastAccessedDate.Format("2006-01-02"))
+	}
+	if len(activity) > 0 {
+		lines = append(lines, line("Activity: ", strings.Join(activity, " | ")))
+	}
+	rotationDates := make([]string, 0, 2)
 	if meta.LastRotatedDate != nil {
-		lines = append(lines, "  Last rotated: "+meta.LastRotatedDate.Format(time.RFC3339))
+		rotationDates = append(rotationDates, "last "+meta.LastRotatedDate.Format("2006-01-02"))
 	}
 	if meta.NextRotationDate != nil {
-		lines = append(lines, "  Next rotation: "+meta.NextRotationDate.Format(time.RFC3339))
+		rotationDates = append(rotationDates, "next "+meta.NextRotationDate.Format("2006-01-02"))
+	}
+	if len(rotationDates) > 0 {
+		lines = append(lines, line("Rotation dates: ", strings.Join(rotationDates, " | ")))
 	}
 	if meta.PrimaryRegion != "" {
-		replication := "primary in " + meta.PrimaryRegion
+		replication := "primary " + meta.PrimaryRegion
 		if meta.Replica {
 			replication = "replica of " + meta.PrimaryRegion
 		}
-		lines = append(lines, "  Replication: "+replication)
+		lines = append(lines, line("Replication: ", replication))
 	}
 	if meta.OwningService != "" {
-		lines = append(lines, "  Managed by: "+meta.OwningService)
+		lines = append(lines, line("Managed by: ", meta.OwningService))
 	}
-	if meta.DeletedDate != nil {
-		lines = append(lines, warningStyle.Render("  Deletion scheduled: "+meta.DeletedDate.Format(time.RFC3339)))
-	}
-	if len(meta.Tags) > 0 {
-		pairs := make([]string, 0, len(meta.Tags))
-		for key, value := range meta.Tags {
-			pairs = append(pairs, key+"="+value)
-		}
-		sort.Strings(pairs)
-		lines = append(lines, "  Tags: "+strings.Join(pairs, ", "))
-	}
-	lines = append(lines, "", panelHeaderStyle.Render("  VERSIONS"))
-	if len(m.versions) == 0 {
-		lines = append(lines, dimStyle.Render("  No version metadata available"))
-	}
-	for i, version := range m.versions {
-		date := ""
-		if version.CreatedDate != nil {
-			date = version.CreatedDate.Format("2006-01-02 15:04")
-		}
-		line := fmt.Sprintf("  %s  [%s]  %s", version.VersionID, strings.Join(version.VersionStages, ","), date)
-		if i == m.versionIndex {
-			line = selectedStyle.Render(line)
-		}
-		lines = append(lines, line)
-	}
-	lines = append(lines, "", panelHeaderStyle.Render("  VALUE"))
-	if m.valueLoading {
-		lines = append(lines, dimStyle.Render("  Loading selected value..."))
-	} else if !m.valueLoaded {
-		lines = append(lines, dimStyle.Render("  Press x to reveal or c to copy"))
-	} else {
+	return lines
+}
+
+func (m SecretsManagerModel) renderSMValuePanel(width, height int) string {
+	contentWidth := max(1, width-4)
+	header := "  SECRET VALUE"
+	if m.valueLoaded {
 		kind := string(m.value.Kind)
 		if m.value.Kind == aws.ValueBinary {
 			kind = "binary, base64"
 		}
-		lines = append(lines, dimStyle.Render("  ("+kind+")"))
+		header += " (" + kind + ")"
+	}
+	lines := []string{panelHeaderStyle.Render(truncateString(header, max(1, width-2))), ""}
+	if m.valueLoading {
+		lines = append(lines, dimStyle.Render("  "+truncateString("Loading selected value...", contentWidth)))
+	} else if !m.valueLoaded {
+		lines = append(lines, dimStyle.Render("  "+truncateString("Press x to reveal or c to copy", contentWidth)))
+	} else {
 		value := displaySecretValue(m.value)
 		if m.masked {
 			value = util.MaskValue(value)
 		} else {
 			value = util.SanitizeTerminal(value)
 		}
-		lines = append(lines, "  "+value)
+		for _, valueLine := range strings.Split(value, "\n") {
+			if len(lines) >= height {
+				break
+			}
+			lines = append(lines, "  "+truncateString(valueLine, contentWidth))
+		}
 	}
-	for len(lines) < m.height-2 {
+	for len(lines) < height {
 		lines = append(lines, "")
 	}
-	lines = append(lines, "  "+separatorStyle.Render(strings.Repeat("─", max(0, m.width-4))))
-	lines = append(lines, m.smStatus(), "  "+renderHelp("tab/shift+tab", "version", "g", "AWSCURRENT", "x", "reveal", "c", "copy-value", "C", "copy-name", "e", "new-version", "T/D", "tags", "Delete", "lifecycle", "u", "restore", "r", "refresh", "esc/q", "back")+"  ")
-	return strings.Join(lines, "\n")
+	return lipgloss.NewStyle().MarginLeft(2).Width(width).Height(height).Render(strings.Join(lines[:height], "\n"))
 }
 
 func (m SecretsManagerModel) smTitle(name string) string {
 	text := fmt.Sprintf(" CLERK - %s | account %s | region %s ", name, m.scope.AccountID, m.scope.Region)
+	text = truncateString(text, max(0, m.width))
 	return titleStyle.Render(text + strings.Repeat(" ", max(0, m.width-lipgloss.Width(text))))
 }
 

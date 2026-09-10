@@ -164,7 +164,7 @@ func TestSecretsRendererMatchesSSMShellAndKeepsSecretPanels(t *testing.T) {
 	changed := time.Date(2026, time.January, 2, 3, 4, 0, 0, time.UTC)
 	rotation := true
 	m := smTestModel(&fakeSecretsManager{}, cache.CacheEntry{Identity: id, Name: "secret", LastModifiedDate: changed, Tags: map[string]string{"env": "prod"}})
-	m.metadata[id] = aws.SecretMetadata{Identity: id, Name: "secret", ARN: id.CanonicalID, Tags: map[string]string{"env": "prod"}, LastChangedDate: &changed, RotationEnabled: &rotation}
+	m.metadata[id] = aws.SecretMetadata{Identity: id, Name: "secret", ARN: id.CanonicalID, Description: "database credentials", KMSKeyID: "alias/secrets", Tags: map[string]string{"env": "prod"}, LastChangedDate: &changed, RotationEnabled: &rotation}
 	m.search.SetValue("secret")
 	m.filter()
 
@@ -176,11 +176,23 @@ func TestSecretsRendererMatchesSSMShellAndKeepsSecretPanels(t *testing.T) {
 	}
 
 	m.mode, m.detailIdentity = smDetail, id
+	m.versions = []aws.SecretVersion{{VersionID: "current-version", VersionStages: []string{"AWSCURRENT"}, CreatedDate: &changed}}
 	detail := m.View()
-	for _, expected := range []string{"CLERK - DETAIL", "METADATA", "VERSIONS", "VALUE", "ARN: arn:secret", "new-version", "lifecycle"} {
+	for _, expected := range []string{"CLERK - DETAIL", "VERSION HISTORY", "SECRET VALUE", "ARN: arn:secret", "Description: database credentials", "KMS: alias/secrets", "Rotation: enabled", "Tags: env=prod", "current-version", "new-version", "lifecycle"} {
 		if !strings.Contains(detail, expected) {
 			t.Fatalf("SM detail missing provider panel or action %q", expected)
 		}
+	}
+	if strings.Count(detail, "────────────────") < 2 {
+		t.Fatal("SM detail is missing its content and footer separators")
+	}
+
+	m.width, m.height = 42, 14
+	m.valueLoaded, m.masked = true, false
+	m.value = aws.NewTextValue(id, strings.Repeat("very-long-value ", 30))
+	narrow := m.View()
+	if strings.Count(narrow, "\n")+1 > m.height {
+		t.Fatalf("narrow detail exceeds terminal height: %d lines", strings.Count(narrow, "\n")+1)
 	}
 }
 
