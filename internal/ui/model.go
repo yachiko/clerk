@@ -22,6 +22,7 @@ type Model struct {
 	cache     *cache.Manager
 	config    *config.Config
 	clipboard *util.ClipboardManager
+	backend   aws.Backend
 
 	searchInput   textinput.Model
 	ready         bool
@@ -31,12 +32,16 @@ type Model struct {
 }
 
 // NewModel creates a new browse model
-func NewModel(client *aws.Client, cacheMgr *cache.Manager, cfg *config.Config) Model {
+func NewModel(client *aws.Client, cacheMgr *cache.Manager, cfg *config.Config, selected ...aws.Backend) Model {
 	// Initialize search input
 	ti := textinput.New()
 	ti.Placeholder = "Search (glob patterns supported)..."
 	ti.CharLimit = 100
 
+	backend := aws.BackendSSM
+	if len(selected) > 0 {
+		backend = selected[0]
+	}
 	return Model{
 		state: State{
 			Mode:          ViewModeList,
@@ -49,6 +54,7 @@ func NewModel(client *aws.Client, cacheMgr *cache.Manager, cfg *config.Config) M
 		cache:       cacheMgr,
 		config:      cfg,
 		clipboard:   util.NewClipboardManager(cfg.ClipboardTimeout),
+		backend:     backend,
 		searchInput: ti,
 	}
 }

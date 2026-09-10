@@ -253,6 +253,28 @@ func (m *Manager) GetAll() []CacheEntry {
 	}
 	return out
 }
+
+// ReplaceSnapshot persists a complete provider metadata scan. It is used by
+// backends whose inventory API does not match the streaming SSM refresh API.
+func (m *Manager) ReplaceSnapshot(entries []CacheEntry) error {
+	qualified := make([]CacheEntry, len(entries))
+	for i, entry := range entries {
+		var err error
+		qualified[i], err = m.qualifyEntry(entry)
+		if err != nil {
+			return err
+		}
+	}
+	return m.withDiskLock(func(data *CacheData) error {
+		next := newCacheData(m.scope)
+		next.LastRefresh = time.Now()
+		next.Entries = qualified
+		next.Complete = true
+		next.Incomplete = false
+		*data = *next
+		return nil
+	})
+}
 func (m *Manager) Search(pattern string) []CacheEntry {
 	m.mu.RLock()
 	defer m.mu.RUnlock()

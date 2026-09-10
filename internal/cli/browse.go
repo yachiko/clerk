@@ -17,8 +17,11 @@ import (
 func InitBrowseCommand() *cobra.Command {
 	browseCmd := &cobra.Command{
 		Use:   "browse",
-		Short: "Interactively browse secrets in AWS Parameter Store",
-		Long: `Start an interactive terminal UI to browse and manage secrets.
+		Short: "Interactively browse secret metadata",
+		Long: `Start an interactive terminal UI for the selected secret backend.
+
+Backend selection is passed into the browser. The current rendering and actions
+remain Parameter Store-oriented while multi-backend TUI support is completed.
 
 Keyboard shortcuts:
   Navigation:
@@ -61,6 +64,10 @@ func runBrowse(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to load config: %w", err)
 	}
 	cfg := cfgMgr.Get()
+	backend, err := selectedBackend(cmd)
+	if err != nil {
+		return err
+	}
 
 	// Create AWS client
 	awsOpts, err := resolveAWSOptions(cmd, cfg)
@@ -68,19 +75,28 @@ func runBrowse(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	client, err := aws.NewClient(ctx, awsOpts)
+	resolved, err := aws.ResolveContext(ctx, awsOpts)
 	if err != nil {
-		return fmt.Errorf("failed to create AWS client: %w", err)
+		return fmt.Errorf("failed to resolve AWS context: %w", err)
+	}
+	client, err := aws.NewClientFromContext(resolved, awsOpts)
+	if err != nil {
+		return fmt.Errorf("failed to create SSM client: %w", err)
+	}
+	if backend == aws.BackendAll || backend == aws.BackendSecretsManager {
+		if _, err := aws.NewSecretsManagerClient(resolved); err != nil {
+			return fmt.Errorf("failed to create Secrets Manager client: %w", err)
+		}
 	}
 
 	// Initialize cache with region and account ID
-	cacheMgr, err := cache.NewManagerForBackend(cfg, client.GetPartition(), client.GetRegion(), client.GetAccountID(), aws.BackendSSM)
+	cacheMgr, err := cache.NewManagerForBackend(cfg, resolved.Partition, resolved.Region, resolved.AccountID, aws.BackendSSM)
 	if err != nil {
 		return fmt.Errorf("failed to initialize cache: %w", err)
 	}
 
 	// Create and run UI immediately - background refresh will load data
-	model := ui.NewModel(client, cacheMgr, cfg)
+	model := ui.NewModel(client, cacheMgr, cfg, backend)
 	p := tea.NewProgram(model, tea.WithAltScreen())
 
 	if _, err := p.Run(); err != nil {

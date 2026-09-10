@@ -25,6 +25,8 @@ func InitDeleteCommand() *cobra.Command {
 		Short: "Delete a secret from AWS Parameter Store",
 		Long: `Delete a secret from AWS Parameter Store.
 
+This mutation requires explicit --backend ssm.
+
 By default, you will be prompted for confirmation before deletion.
 Use --force to skip the confirmation prompt.
 
@@ -40,8 +42,9 @@ Examples:
 
   # Delete and output JSON
   clerk delete "/dev/old_secret" --force --output json`,
-		Args: cobra.ExactArgs(1),
-		RunE: runDelete,
+		Args:    cobra.ExactArgs(1),
+		PreRunE: func(cmd *cobra.Command, _ []string) error { return requireExplicitSSM(cmd) },
+		RunE:    runDelete,
 	}
 
 	deleteCmd.Flags().BoolVar(&deleteForce, "force", false, "Skip confirmation prompt")

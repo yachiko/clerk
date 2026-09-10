@@ -19,8 +19,8 @@ type VersionHistoryEntry struct {
 type CacheEntry struct {
 	Identity         aws.ResourceIdentity  `json:"identity"`
 	Name             string                `json:"name"`
-	Type             string                `json:"type"`
-	Version          int64                 `json:"version"`
+	Type             string                `json:"type,omitempty"`
+	Version          int64                 `json:"version,omitempty"`
 	LastModifiedDate time.Time             `json:"last_modified_date"`
 	Tags             map[string]string     `json:"tags,omitempty"`
 	TagsFetchedAt    time.Time             `json:"tags_fetched_at,omitempty"`

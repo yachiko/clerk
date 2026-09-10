@@ -31,6 +31,8 @@ func InitPutCommand() *cobra.Command {
 		Short: "Create or update a secret in AWS Parameter Store",
 		Long: `Create a new secret or update an existing one in AWS Parameter Store.
 
+This mutation requires explicit --backend ssm.
+
 Positional values are literal. Use --file or --stdin for exact bytes.
 
 Examples:
@@ -48,8 +50,9 @@ Examples:
 
   # Create with custom KMS key
   clerk put "/prod/secret" "value" --kms-key-id "alias/my-key"`,
-		Args: validatePutArgs,
-		RunE: runPut,
+		Args:    validatePutArgs,
+		PreRunE: func(cmd *cobra.Command, _ []string) error { return requireExplicitSSM(cmd) },
+		RunE:    runPut,
 	}
 
 	putCmd.Flags().StringVar(&putTags, "tags", "", "Tags in format key1=value1,key2=value2")

@@ -22,6 +22,8 @@ func InitCopyCommand() *cobra.Command {
 		Short: "Copy a secret in AWS Parameter Store",
 		Long: `Copy a secret from source to destination in AWS Parameter Store.
 
+This mutation requires explicit --backend ssm.
+
 The destination inherits supported type, tags, and protection metadata. Existing
 destinations are refused unless --overwrite is explicitly provided.
 
@@ -34,8 +36,9 @@ Examples:
 
   # Copy as JSON output
   clerk cp "/dev/secret" "/dev/secret-copy" --output json`,
-		Args: cobra.ExactArgs(2),
-		RunE: runCopy,
+		Args:    cobra.ExactArgs(2),
+		PreRunE: func(cmd *cobra.Command, _ []string) error { return requireExplicitSSM(cmd) },
+		RunE:    runCopy,
 	}
 	copyCmd.Flags().BoolVar(&copyOverwrite, "overwrite", false, "Replace an existing destination")
 

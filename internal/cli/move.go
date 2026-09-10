@@ -23,6 +23,8 @@ func InitMoveCommand() *cobra.Command {
 		Short: "Move a secret in AWS Parameter Store",
 		Long: `Move (rename) a secret in AWS Parameter Store.
 
+This mutation requires explicit --backend ssm.
+
 This is a verified copy followed by a source deletion. It preserves supported
 metadata and leaves both parameters in place if source deletion fails.
 
@@ -37,8 +39,9 @@ Examples:
 
   # Move as JSON output
   clerk mv "/dev/secret" "/dev/secret-renamed" --output json --force`,
-		Args: cobra.ExactArgs(2),
-		RunE: runMove,
+		Args:    cobra.ExactArgs(2),
+		PreRunE: func(cmd *cobra.Command, _ []string) error { return requireExplicitSSM(cmd) },
+		RunE:    runMove,
 	}
 
 	moveCmd.Flags().BoolVar(&moveForce, "force", false, "Skip confirmation prompt")

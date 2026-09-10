@@ -2,8 +2,10 @@ package cli
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"strconv"
 	"strings"
@@ -19,14 +21,22 @@ import (
 var (
 	getMask      bool
 	getValueOnly bool
+	getStage     string
+	getVersionID string
+	getRaw       bool
 )
 
 // InitGetCommand initializes the GET command
 func InitGetCommand() *cobra.Command {
 	getCmd := &cobra.Command{
-		Use:   "get <name[@version|:label]>",
-		Short: "Retrieve a secret from AWS Parameter Store",
-		Long: `Retrieve the value of a secret from AWS Parameter Store.
+		Use:   "get <name-or-secret-id>",
+		Short: "Retrieve one value from a concrete secret backend",
+		Long: `Retrieve one value from Parameter Store or Secrets Manager.
+
+You must explicitly choose --backend ssm or --backend secretsmanager. SSM keeps
+the name@version and name:label shorthand. Secrets Manager uses --stage or
+--version-id and defaults to AWSCURRENT. Binary secrets are base64 unless
+--raw --value is requested.
 
 By default, the secret is decrypted and displayed. Use --mask to show
 a masked version of the value.
@@ -55,21 +65,49 @@ Examples:
 
   # Get as JSON
   clerk get "/dev/db_password" --output json`,
-		Args: cobra.ExactArgs(1),
-		RunE: runGet,
+		Args:    cobra.ExactArgs(1),
+		PreRunE: validateGetFlags,
+		RunE:    runGet,
 	}
 
 	getCmd.Flags().BoolVar(&getMask, "mask", false, "Show masked value instead of actual value")
 	getCmd.Flags().BoolVar(&getValueOnly, "value", false, "Output only the value (no metadata)")
+	getCmd.Flags().StringVar(&getStage, "stage", "", "Secrets Manager version stage (default AWSCURRENT)")
+	getCmd.Flags().StringVar(&getVersionID, "version-id", "", "Secrets Manager opaque version ID")
+	getCmd.Flags().BoolVar(&getRaw, "raw", false, "Write exact SecretBinary bytes (requires --value)")
 
 	return getCmd
+}
+
+func validateGetFlags(cmd *cobra.Command, _ []string) error {
+	backend, err := requireConcreteBackend(cmd, "get", true)
+	if err != nil {
+		return err
+	}
+	if getStage != "" && getVersionID != "" {
+		return fmt.Errorf("--stage and --version-id are mutually exclusive")
+	}
+	if getRaw && !getValueOnly {
+		return fmt.Errorf("--raw is valid only with --value")
+	}
+	if backend == aws.BackendSSM && (getStage != "" || getVersionID != "" || getRaw) {
+		return fmt.Errorf("--stage, --version-id, and --raw are supported only with --backend secretsmanager")
+	}
+	return nil
 }
 
 func runGet(cmd *cobra.Command, args []string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
+	backend, err := requireConcreteBackend(cmd, "get", true)
+	if err != nil {
+		return err
+	}
 	nameWithVersionOrLabel := args[0]
+	if backend == aws.BackendSecretsManager {
+		return runSecretsManagerGet(ctx, cmd, nameWithVersionOrLabel)
+	}
 
 	// Parse name, version, and label
 	name, version, label, err := parseNameVersionLabel(nameWithVersionOrLabel)
@@ -143,6 +181,90 @@ func runGet(cmd *cobra.Command, args []string) error {
 
 	// Output
 	return outputParameter(param, displayValue)
+}
+
+func runSecretsManagerGet(ctx context.Context, cmd *cobra.Command, secretID string) error {
+	if strings.TrimSpace(secretID) == "" {
+		return fmt.Errorf("secret ID is required")
+	}
+	cfgMgr, err := config.NewManager()
+	if err != nil {
+		return fmt.Errorf("failed to load config: %w", err)
+	}
+	awsOpts, err := resolveAWSOptions(cmd, cfgMgr.Get())
+	if err != nil {
+		return err
+	}
+	resolved, err := aws.ResolveContext(ctx, awsOpts)
+	if err != nil {
+		return fmt.Errorf("failed to resolve AWS context: %w", err)
+	}
+	client, err := aws.NewSecretsManagerClient(resolved)
+	if err != nil {
+		return fmt.Errorf("failed to create Secrets Manager client: %w", err)
+	}
+	detail, err := client.GetSecretValue(ctx, secretID, aws.SecretValueSelector{VersionStage: getStage, VersionID: getVersionID})
+	if err != nil {
+		return err
+	}
+	return outputSecret(detail)
+}
+
+func outputSecret(detail *aws.SecretDetail) error {
+	return outputSecretTo(os.Stdout, detail)
+}
+
+func outputSecretTo(w io.Writer, detail *aws.SecretDetail) error {
+	if detail.Value.Kind == aws.ValueBinary && getMask {
+		return fmt.Errorf("--mask is not valid for binary secrets")
+	}
+	if detail.Value.Kind != aws.ValueBinary && getRaw {
+		return fmt.Errorf("--raw is valid only for binary secrets")
+	}
+	if getValueOnly {
+		if detail.Value.Kind == aws.ValueBinary {
+			if getRaw {
+				_, err := w.Write(detail.Value.Binary)
+				return err
+			}
+			_, err := fmt.Fprint(w, base64.StdEncoding.EncodeToString(detail.Value.Binary))
+			return err
+		}
+		value := detail.Value.Text
+		if getMask {
+			value = util.MaskValue(value)
+		}
+		_, err := fmt.Fprint(w, value)
+		return err
+	}
+	value, encoding := detail.Value.Text, "string"
+	if detail.Value.Kind == aws.ValueBinary {
+		value, encoding = base64.StdEncoding.EncodeToString(detail.Value.Binary), "base64"
+	} else if getMask {
+		value = util.MaskValue(value)
+	}
+	if globalOpts.Output == "json" {
+		result := struct {
+			Backend       aws.Backend `json:"backend"`
+			Name          string      `json:"name"`
+			ARN           string      `json:"arn"`
+			Value         string      `json:"value"`
+			ValueEncoding string      `json:"value_encoding"`
+			VersionID     string      `json:"version_id"`
+			VersionStages []string    `json:"version_stages,omitempty"`
+			CreatedDate   *time.Time  `json:"created_date,omitempty"`
+		}{aws.BackendSecretsManager, detail.Name, detail.ARN, value, encoding, detail.VersionID, detail.VersionStages, detail.CreatedDate}
+		encoder := json.NewEncoder(w)
+		encoder.SetIndent("", "  ")
+		return encoder.Encode(result)
+	}
+	fmt.Fprintf(w, "Name: %s\n", util.SanitizeTerminal(detail.Name))
+	fmt.Fprintf(w, "Value: %s\n", util.SanitizeTerminal(value))
+	fmt.Fprintf(w, "Encoding: %s\n", encoding)
+	fmt.Fprintf(w, "Backend: %s\n", aws.BackendSecretsManager)
+	fmt.Fprintf(w, "Version ID: %s\n", util.SanitizeTerminal(detail.VersionID))
+	fmt.Fprintf(w, "ARN: %s\n", util.SanitizeTerminal(detail.ARN))
+	return nil
 }
 
 // parseNameVersionLabel parses "name@version" or "name:label" format

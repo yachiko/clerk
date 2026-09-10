@@ -18,11 +18,10 @@ import (
 func InitRefreshCommand() *cobra.Command {
 	refreshCmd := &cobra.Command{
 		Use:   "refresh",
-		Short: "Refresh the local cache of parameter metadata",
-		Long: `Refresh the local cache by fetching all parameter metadata from AWS Parameter Store.
+		Short: "Refresh one backend's local metadata cache",
+		Long: `Refresh the local metadata cache for one explicitly selected backend.
 
-This command fetches parameter names, types, versions, modification dates, and tags.
-Secret values are NOT cached for security reasons.
+Use --backend ssm or --backend secretsmanager. Secret values are never cached.
 
 The refresh process uses parallel fetching to speed up the operation.
 
@@ -35,6 +34,10 @@ Examples:
 
   # Refresh with JSON output
   clerk refresh --output json`,
+		PreRunE: func(cmd *cobra.Command, _ []string) error {
+			_, err := requireConcreteBackend(cmd, "refresh", false)
+			return err
+		},
 		RunE: runRefresh,
 	}
 
@@ -51,6 +54,10 @@ func runRefresh(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to load config: %w", err)
 	}
 	cfg := cfgMgr.Get()
+	backend, err := requireConcreteBackend(cmd, "refresh", false)
+	if err != nil {
+		return err
+	}
 
 	// Create AWS client
 	awsOpts, err := resolveAWSOptions(cmd, cfg)
@@ -58,13 +65,12 @@ func runRefresh(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	client, err := aws.NewClient(ctx, awsOpts)
+	resolved, err := aws.ResolveContext(ctx, awsOpts)
 	if err != nil {
-		return fmt.Errorf("failed to create AWS client: %w", err)
+		return fmt.Errorf("failed to resolve AWS context: %w", err)
 	}
 
-	// Initialize cache manager with region and account ID
-	cacheMgr, err := cache.NewManagerForBackend(cfg, client.GetPartition(), client.GetRegion(), client.GetAccountID(), aws.BackendSSM)
+	cacheMgr, err := cache.NewManagerForBackend(cfg, resolved.Partition, resolved.Region, resolved.AccountID, backend)
 	if err != nil {
 		return fmt.Errorf("failed to initialize cache: %w", err)
 	}
@@ -84,10 +90,33 @@ func runRefresh(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// Perform refresh
-	effectiveRegion := client.GetRegion()
-
-	err = cacheMgr.Refresh(ctx, client, effectiveRegion, cfg.ParallelFetches, progressCb)
+	if backend == aws.BackendSecretsManager {
+		client, clientErr := aws.NewSecretsManagerClient(resolved)
+		if clientErr != nil {
+			return fmt.Errorf("failed to create Secrets Manager client: %w", clientErr)
+		}
+		secrets, listErr := client.ListSecrets(ctx)
+		if listErr != nil {
+			return fmt.Errorf("failed to refresh cache: %w", listErr)
+		}
+		entries := make([]cache.CacheEntry, 0, len(secrets))
+		for _, secret := range secrets {
+			entry := cache.CacheEntry{Identity: secret.Identity, Name: secret.Name, Tags: secret.Tags, TagsComplete: true}
+			if secret.LastChangedDate != nil {
+				entry.LastModifiedDate = *secret.LastChangedDate
+			} else if secret.CreatedDate != nil {
+				entry.LastModifiedDate = *secret.CreatedDate
+			}
+			entries = append(entries, entry)
+		}
+		err = cacheMgr.ReplaceSnapshot(entries)
+	} else {
+		client, clientErr := aws.NewClientFromContext(resolved, awsOpts)
+		if clientErr != nil {
+			return fmt.Errorf("failed to create SSM client: %w", clientErr)
+		}
+		err = cacheMgr.Refresh(ctx, client, resolved.Region, cfg.ParallelFetches, progressCb)
+	}
 	if err != nil {
 		return fmt.Errorf("failed to refresh cache: %w", err)
 	}
