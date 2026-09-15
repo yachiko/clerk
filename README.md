@@ -30,7 +30,7 @@
 ### Homebrew (macOS / Linux)
 
 ```sh
-brew install yachiko/tap/clerk
+brew install --cask yachiko/tap/clerk
 ```
 
 ### Using Go
