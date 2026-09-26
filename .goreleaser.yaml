@@ -70,12 +70,21 @@ homebrew_casks:
     # Strip the macOS quarantine bit so the unsigned binary can launch.
     # Without this, Gatekeeper rejects with "clerk is damaged and cannot be
     # opened". The alternative is paying for Apple Developer notarization.
-    hooks:
-      post:
-        install: |
-          if OS.mac?
-            system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/clerk"]
-          end
+    #
+    # Emitted via custom_block rather than hooks.post.install: GoReleaser
+    # (<= v2.18) renders hooks as Homebrew's deprecated `postflight do` block,
+    # which warns on every install. Switch to the native hooks option once
+    # goreleaser/goreleaser#6873 ships (planned for v2.19).
+    #
+    # GoReleaser renders the whole cask through its template engine, so
+    # Homebrew's {{staged_path}} placeholder must be escaped as a literal.
+    custom_block: |-
+      postflight_steps do
+        on_macos do
+          run "/usr/bin/xattr",
+              args: ["-dr", "com.apple.quarantine", "{{ "{{staged_path}}" }}/clerk"]
+        end
+      end
 
 checksum:
   name_template: "checksums.txt"
