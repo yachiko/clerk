@@ -155,7 +155,9 @@ then the AWS SDK environment/shared configuration. An unset region produces an
 actionable error if the SDK cannot resolve one. Explicit `--profile default`
 selects that profile even when `AWS_PROFILE` names a different profile. Leaving
 the profile unset keeps the standard credential chain, including environment
-credentials and roles. Confirm the resolved account and region before mutations.
+credentials and roles. A configured profile is ignored while
+`AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` are set, so wrappers that export
+assumed-role credentials work; only `--profile` overrides them. Confirm the resolved account and region before mutations.
 
 Duration fields accept strings such as `3h` and legacy numeric nanoseconds;
 configuration saves use strings. Negative durations and invalid concurrency or
