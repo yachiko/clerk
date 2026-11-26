@@ -3,6 +3,10 @@
 </p>
 
 <h1 align="center">Clerk</h1>
+<table align="center"><tr><td>
+<strong>clerk</strong> · <em>from Late Latin <em>clericus</em></em><br>
+a man of the Church, and so, for centuries, the one who could read and write and kept the records.
+</td></tr></table>
 <p align="center"><strong>Tool for managing secrets in AWS Parameter Store with an interactive terminal UI</strong></p>
 
 <p align="center">
